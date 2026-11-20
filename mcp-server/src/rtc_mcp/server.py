@@ -21,6 +21,7 @@ from pydantic import Field
 
 from .client import CalculadoraError, Config, RtcClient
 from .comparador import Cenario, ErroComparacao, comparar
+from .auditoria import ErroAuditoria, auditar
 
 try:  # SDK MCP 2.x
     from mcp.server.mcpserver import MCPServer as _Servidor
@@ -45,6 +46,7 @@ Regras de uso:
 - Cite cClassTrib, CST, fundamentação legal e as versões em "metadados" ao apresentar um resultado.
 - Se "metadados.avisoDadosSimulados" estiver presente, avise que os valores são simulados.
 - Erros por item (códigos REG-xxx e VSN-xxx) podem ser detalhados com as ferramentas descrever_erro_*.
+- auditar_nfe confere o IBS/CBS de uma NF-e/NFC-e (XSD, classificação, base, valores e totais).
 - comparar_regimes_simples_regular compara o IBS/CBS no Simples e no regime regular (só IBS/CBS).
 - gerar_danfse produz o PDF da NFS-e a partir do XML autorizado e devolve o caminho do arquivo gravado.
 """
@@ -506,6 +508,43 @@ def criar_servidor(cliente: RtcClient | None = None) -> Any:
             f"calculadora/simples-nacional/atividades/{codigo}",
             params={"data": data, "tpDoc": tp_doc, "cClassTrib": c_class_trib},
         )
+
+    # ------------------------------------------------------------------
+    # Auditoria de NF-e/NFC-e
+    # ------------------------------------------------------------------
+
+    @mcp.tool(annotations=LEITURA)
+    async def auditar_nfe(
+        xml: Annotated[str | None, Field(description="XML da NF-e/NFC-e. Use este ou caminho_xml")] = None,
+        caminho_xml: Annotated[
+            str | None, Field(description="Caminho de um arquivo .xml na máquina do servidor MCP. Use este ou xml")
+        ] = None,
+    ) -> Resultado:
+        """Audita o IBS/CBS de uma NF-e ou NFC-e contra as calculadoras oficiais.
+
+        Confere o XML no XSD, a classificação de cada item (cClassTrib x CST x NCM), a base de cálculo
+        recalculada a partir dos componentes do item, as reduções e os valores de IBS UF, IBS municipal e
+        CBS, e os totais do grupo IBSCBSTot. Devolve a situação (conforme ou com divergências), os achados
+        com gravidade, campo, valor declarado e valor calculado, e a comparação item a item.
+
+        Não confere ICMS, IPI, PIS/COFINS, diferimento, devolução de tributos, tributação regular,
+        crédito presumido nem Imposto Seletivo. Notas de emitentes do Simples Nacional (CRT 1, 2 ou 4)
+        têm só a estrutura e a classificação conferidas.
+        """
+        if (xml is None) == (caminho_xml is None):
+            raise ToolError("Informe exatamente um entre 'xml' e 'caminho_xml'.")
+        if caminho_xml is not None:
+            origem = Path(caminho_xml).expanduser()
+            if origem.suffix.lower() != ".xml":
+                raise ToolError("caminho_xml deve apontar para um arquivo .xml.")
+            try:
+                xml = origem.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ToolError(f"Não foi possível ler {origem}: {exc}") from exc
+        try:
+            return {"dados": await auditar(rtc, xml), "metadados": {}}
+        except ErroAuditoria as exc:
+            raise ToolError(str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Comparação Simples Nacional x regime regular
