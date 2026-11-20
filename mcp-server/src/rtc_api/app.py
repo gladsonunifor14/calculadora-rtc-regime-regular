@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import math
+import secrets
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -24,8 +25,17 @@ from rtc_mcp.client import RtcClient
 from rtc_mcp.comparador import Cenario
 
 from . import __version__
-from .banco import Banco, Chave, ReferenciaDuplicada, agora, iso, periodo_de
+from .banco import Banco, BancoPedidos, Chave, Pedido, ReferenciaDuplicada, agora, iso, periodo_de
 from .config import Configuracao
+from .mercado_pago import (
+    AssinaturaInvalida,
+    MercadoPagoIndisponivel,
+    centavos,
+    consultar_pagamento,
+    processar_pagamento,
+    situacao_publica,
+    validar_assinatura,
+)
 from .seguranca import confere, confere_token, gerar_chave, hash_chave, prefixo_de
 
 log = logging.getLogger("rtc_api")
@@ -75,6 +85,7 @@ TAGS = [
     {"name": "Conta", "description": "Situação da chave de acesso e consumo do período."},
     {"name": "Cálculo", "description": "Operações determinísticas sobre as calculadoras oficiais, sem IA (escopo `calculo`)."},
     {"name": "Agentes", "description": "Agentes de IA que conferem o resultado nas calculadoras oficiais (escopo `agentes`). Podem levar alguns minutos."},
+    {"name": "Compra", "description": "Resgate da chave comprada pelo Mercado Pago, com o código mostrado depois do pagamento."},
     {"name": "Administração", "description": "Emissão, renovação e revogação de chaves. Exige `X-Admin-Token`."},
     {"name": "Saúde", "description": "Disponibilidade da API."},
 ]
@@ -211,6 +222,45 @@ class PedidoRevogacao(BaseModel):
     motivo: str = Field(min_length=3, max_length=500)
 
 
+class NovoPedido(BaseModel):
+    cliente: str = Field(min_length=2, max_length=200, description="Identificação do comprador no seu sistema")
+    plano: str = Field(examples=["completo"])
+    validadeDias: int = Field(ge=1, le=1095, description="Validade da chave a partir da aprovação do pagamento")
+    valor: str = Field(pattern=r"^\d{1,7}(\.\d{1,2})?$", examples=["199.90"], description="Valor cobrado no checkout (BRL)")
+
+
+class PedidoSituacao(BaseModel):
+    id: str
+    externalReference: str = Field(description="Ponha este valor em external_reference da preferência do Checkout Pro")
+    cliente: str
+    plano: str
+    validadeDias: int
+    valor: str
+    situacao: Literal["aguardando_pagamento", "pago", "resgatado", "estornado"]
+    pagamentoId: str | None
+    pagoEm: datetime | None
+    chaveId: str | None
+    resgatadoEm: datetime | None
+    estornadoEm: datetime | None
+    motivoEstorno: str | None
+
+
+class PedidoCriado(PedidoSituacao):
+    codigoResgate: str = Field(description="Mostre ao comprador na página de retorno. Aparece só nesta resposta.")
+
+
+class PedidoResgate(BaseModel):
+    codigoResgate: str = Field(min_length=20, max_length=100)
+
+
+class ChaveResgatada(BaseModel):
+    chave: str = Field(description="Chave de acesso. É exibida uma única vez: guarde em local seguro.")
+    plano: str
+    escopos: list[str]
+    expiraEm: datetime
+    limites: Limites
+
+
 def _admin(chave: Chave, momento: datetime) -> dict[str, Any]:
     return {
         "id": chave.id, "prefixo": chave.prefixo, "cliente": chave.cliente, "referenciaCompra": chave.referencia_compra,
@@ -315,18 +365,23 @@ def criar_app(
     executores: dict[str, Callable[..., Awaitable[Any]]] | None = None,
     cliente_rtc: RtcClient | None = None,
     relogio: Callable[[], datetime] = agora,
+    http_mercado_pago: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     config = config or Configuracao.from_env()
     banco = Banco(config.banco)
+    pedidos = BancoPedidos(banco)
     semaforo_agentes = asyncio.Semaphore(config.agentes_simultaneos)
     executores = executores or {}
 
     @asynccontextmanager
     async def ciclo(app: FastAPI):
         app.state.rtc = cliente_rtc or RtcClient()
+        app.state.http_mp = http_mercado_pago or httpx.AsyncClient(timeout=10)
         yield
         if cliente_rtc is None:
             await app.state.rtc.aclose()
+        if http_mercado_pago is None:
+            await app.state.http_mp.aclose()
 
     app = FastAPI(
         title="API RTC: agentes e cálculos da Reforma Tributária",
@@ -578,6 +633,116 @@ def criar_app(
         chave = banco.revogar(id, pedido.motivo)
         log.info("Chave revogada: id=%s", id)
         return _admin(chave, relogio())
+
+    # ------------------------------------------------------------ compra pelo Mercado Pago
+
+    def _pedido_publico(p: Pedido) -> dict[str, Any]:
+        return {"id": p.id, "externalReference": p.external_reference, "cliente": p.cliente, "plano": p.plano,
+                "validadeDias": p.validade_dias, "valor": f"{p.valor_centavos / 100:.2f}", "situacao": situacao_publica(p),
+                "pagamentoId": p.pagamento_id, "pagoEm": p.pago_em, "chaveId": p.chave_id, "resgatadoEm": p.resgatado_em,
+                "estornadoEm": p.estornado_em, "motivoEstorno": p.motivo_estorno}
+
+    @app.post("/admin/pedidos", tags=["Administração"], include_in_schema=docs, status_code=201,
+              response_model=PedidoCriado, dependencies=[Depends(administrador)])
+    def criar_pedido(pedido: NovoPedido):
+        """Registra um pedido antes do checkout do Mercado Pago. Ponha `externalReference` na preferência e
+        mostre `codigoResgate` ao comprador na página de retorno (aparece só nesta resposta)."""
+        if pedido.plano not in config.planos:
+            raise ErroApi(422, "plano-desconhecido", "Plano desconhecido", f"Planos: {', '.join(config.planos)}.")
+        if not centavos(pedido.valor):
+            raise ErroApi(422, "valor-invalido", "Valor inválido", "O valor do pedido precisa ser maior que zero.")
+        codigo = secrets.token_urlsafe(32)
+        criado = pedidos.criar(codigo_hash=hash_chave(codigo, config.pepper), cliente=pedido.cliente, plano=pedido.plano,
+                               validade_dias=pedido.validadeDias, valor_centavos=centavos(pedido.valor))
+        log.info("Pedido criado: id=%s plano=%s", criado.id, criado.plano)
+        return {**_pedido_publico(criado), "codigoResgate": codigo}
+
+    @app.get("/admin/pedidos/{id}", tags=["Administração"], include_in_schema=docs, response_model=PedidoSituacao,
+             dependencies=[Depends(administrador)])
+    def obter_pedido(id: str = PathParam()):
+        p = pedidos.obter(id)
+        if p is None:
+            raise ErroApi(404, "pedido-nao-encontrado", "Pedido não encontrado", f"Não existe pedido com id {id}.")
+        return _pedido_publico(p)
+
+    @app.post("/webhooks/mercadopago", tags=["Administração"], include_in_schema=docs, summary="Webhook do Mercado Pago")
+    async def webhook_mercado_pago(
+        request: Request,
+        x_signature: str | None = Header(None, alias="x-signature"),
+        x_request_id: str | None = Header(None, alias="x-request-id"),
+    ) -> dict[str, Any]:
+        """Recebe as notificações do tópico `payment`. Confere a assinatura, consulta o pagamento na API do Mercado
+        Pago e atualiza o pedido. Responde 200 rápido; falhas da API do Mercado Pago dão 503 para ele reenviar."""
+        if not (config.mp_webhook_secret and config.mp_access_token):
+            raise ErroApi(503, "mercado-pago-nao-configurado", "Mercado Pago não configurado",
+                          "Defina RTC_API_MP_WEBHOOK_SECRET e RTC_API_MP_ACCESS_TOKEN.")
+        data_id = request.query_params.get("data.id")
+        try:
+            validar_assinatura(config.mp_webhook_secret, x_signature, x_request_id, data_id)
+        except AssinaturaInvalida as exc:
+            log.warning("Webhook do Mercado Pago com assinatura inválida (%s), x-request-id=%s", exc, x_request_id)
+            raise ErroApi(401, "assinatura-invalida", "Assinatura inválida", "A notificação não tem assinatura válida.") from None
+        try:
+            corpo = json.loads(await request.body() or b"{}")
+        except ValueError:
+            corpo = {}
+        tipo = request.query_params.get("type") or corpo.get("type")
+        id_corpo = str((corpo.get("data") or {}).get("id") or "") or None
+        if tipo != "payment" or not data_id or (id_corpo and id_corpo != data_id):
+            # Só o tópico payment interessa; o id usado é o assinado (query data.id), que precisa bater com o corpo.
+            return {"desfecho": "ignorado"}
+        try:
+            pagamento = await consultar_pagamento(request.app.state.http_mp, config.mp_api_url, config.mp_access_token, data_id)
+        except MercadoPagoIndisponivel as exc:
+            log.error("API do Mercado Pago indisponível ao consultar o pagamento %s: %s", data_id, exc)
+            raise ErroApi(503, "mercado-pago-indisponivel", "Mercado Pago indisponível", "Tente novamente.") from None
+        if pagamento is None:
+            return {"desfecho": "ignorado"}
+        resultado = await processar_pagamento(pagamento, pedidos, lambda chave_id, motivo: banco.revogar(chave_id, motivo))
+        return {"desfecho": resultado.desfecho}
+
+    @app.post("/v1/resgate", tags=["Compra"], response_model=ChaveResgatada, summary="Resgata a chave comprada",
+              responses={404: {"model": Problema, "description": "Código inválido"},
+                         409: {"model": Problema, "description": "Pagamento pendente, chave já resgatada ou pedido estornado"}})
+    def resgatar(pedido: PedidoResgate):
+        """Troca o código de resgate, mostrado depois do pagamento, pela chave de acesso. Funciona uma única vez:
+        guarde a chave, ela não pode ser exibida de novo."""
+        p = pedidos.por_codigo(hash_chave(pedido.codigoResgate, config.pepper))
+        if p is None:
+            raise ErroApi(404, "codigo-invalido", "Código de resgate inválido", "Confira o código recebido após o pagamento.")
+        if p.situacao == "aguardando":
+            raise ErroApi(409, "pagamento-pendente", "Pagamento ainda não aprovado",
+                          "O pagamento ainda não foi confirmado pelo Mercado Pago. Tente de novo em alguns minutos.")
+        if p.situacao == "resgatado":
+            raise ErroApi(409, "ja-resgatado", "Chave já resgatada", "Esta compra já teve a chave resgatada. Fale com o suporte.")
+        if p.situacao == "estornado":
+            raise ErroApi(409, "pedido-estornado", "Pedido estornado", "O pagamento desta compra foi estornado.")
+        momento = relogio()
+        expira = p.pago_em + timedelta(days=p.validade_dias)
+        if expira <= momento:
+            raise ErroApi(409, "validade-encerrada", "Validade encerrada", "A validade desta compra terminou antes do resgate.")
+        plano = config.planos.get(p.plano)
+        if plano is None:
+            raise ErroApi(409, "plano-indisponivel", "Plano indisponível", "O plano desta compra não existe mais. Fale com o suporte.")
+        valor, prefixo = gerar_chave()
+        try:
+            chave = banco.emitir(
+                prefixo=prefixo, hash_=hash_chave(valor, config.pepper), cliente=p.cliente,
+                referencia_compra=f"mp:{p.pagamento_id}", plano=p.plano, escopos=list(plano["escopos"]),
+                cota_calculo=plano["cotaCalculo"], cota_agentes=plano["cotaAgentes"],
+                limite_por_minuto=plano["limitePorMinuto"], expira_em=expira,
+            )
+        except ReferenciaDuplicada:
+            raise ErroApi(409, "ja-resgatado", "Chave já resgatada", "Esta compra já teve a chave resgatada.") from None
+        if not pedidos.marcar_resgatado(p.id, chave.id):
+            # O pedido mudou no meio do resgate (estorno simultâneo): a chave não pode valer.
+            banco.revogar(chave.id, "pedido alterado durante o resgate")
+            raise ErroApi(409, "pedido-alterado", "Pedido alterado", "O pedido mudou durante o resgate. Fale com o suporte.")
+        log.info("Chave resgatada: pedido=%s chave=%s prefixo=%s", p.id, chave.id, chave.prefixo)
+        return ChaveResgatada(
+            chave=valor, plano=chave.plano, escopos=chave.escopos, expiraEm=chave.expira_em,
+            limites=Limites(cotaCalculo=chave.cota_calculo, cotaAgentes=chave.cota_agentes, limitePorMinuto=chave.limite_por_minuto),
+        )
 
     # ------------------------------------------------------------ saúde
 

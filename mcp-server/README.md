@@ -373,6 +373,43 @@ validade), revogar (`POST /admin/chaves/{id}/revogar`) e ver os planos (`GET /ad
 
 A emissão aceita `limites` próprios para uma chave e `expiraEm` no lugar de `validadeDias`.
 
+### Venda pelo Mercado Pago (Checkout Pro)
+
+O webhook do Mercado Pago confirma os pagamentos, e o comprador resgata a chave sozinho, sem intervenção manual.
+
+```bash
+export RTC_API_MP_WEBHOOK_SECRET=...   # assinatura secreta: Suas integrações > Webhooks > Configurar notificação
+export RTC_API_MP_ACCESS_TOKEN=...     # access token da aplicação (para consultar o pagamento)
+```
+
+No painel do Mercado Pago, cadastre a URL `https://sua-api/webhooks/mercadopago` no tópico **Pagamentos**.
+
+1. **Pedido:** antes de criar a preferência do Checkout Pro, o seu sistema registra o pedido:
+
+   ```bash
+   curl -X POST https://sua-api/admin/pedidos -H "X-Admin-Token: $RTC_API_ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"cliente": "12345678000199", "plano": "completo", "validadeDias": 365, "valor": "199.90"}'
+   ```
+
+   A resposta traz `externalReference` (ponha em `external_reference` da preferência) e `codigoResgate`
+   (mostre ao comprador na página de retorno, a `back_url`). O código aparece só nessa resposta.
+2. **Pagamento:** o Mercado Pago chama o webhook. A API confere a assinatura `x-signature` com o validador do
+   SDK oficial (`mercadopago`) e consulta o pagamento em `GET /v1/payments/{id}`, porque o corpo da notificação
+   não é confiável. O pedido só é pago se o pagamento estiver `approved`, em BRL, com valor igual ou maior que
+   o do pedido e com a `external_reference` dele. Falha na API do Mercado Pago responde 503, para ele
+   reenviar (o Mercado Pago tenta de novo a cada 15 minutos).
+3. **Resgate:** o comprador chama `POST /v1/resgate` com o código (rota pública, no Swagger) e recebe a chave
+   uma única vez. A validade conta da aprovação do pagamento. A chave só é gerada no resgate, então nunca fica
+   guardada, nem cifrada. Resgates simultâneos emitem uma chave só.
+4. **Estorno:** se uma notificação posterior do mesmo pagamento mostrar status diferente de `approved` ou valor
+   reembolsado (`transaction_amount_refunded` > 0), o pedido é estornado e a chave, se já resgatada, revogada.
+
+Notificações repetidas são idempotentes. Pagamentos de outros sistemas (outra `external_reference`) são
+ignorados. Um segundo pagamento do mesmo pedido fica registrado no log para reembolso manual. `GET
+/admin/pedidos/{id}` mostra a situação do pedido. O webhook e as rotas de pedido ficam fora do Swagger
+público.
+
 ### Segurança e regras
 
 - **Chaves:** 256 bits de entropia. O banco guarda só o HMAC-SHA256 da chave com o pepper do servidor, nunca a

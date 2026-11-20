@@ -104,6 +104,8 @@ def test_planos_invalidos():
 def test_formato_e_hash_da_chave():
     chave, prefixo = gerar_chave()
     assert prefixo_de(chave) == prefixo and len(chave) == 4 + 12 + 1 + 43
+    # Segredos com "_" (base64url) continuam reconhecidos.
+    assert prefixo_de("rtc_0123456789ab_" + "a_b" * 14 + "c") == "0123456789ab"
     assert hash_chave(chave, PEPPER) != hash_chave(chave, "outro" * 10)
     assert prefixo_de("rtc_123_abc") is None and prefixo_de("") is None
 
@@ -112,7 +114,9 @@ def test_banco_guarda_so_o_hash(ambiente):
     emitida = emitir(ambiente)
     conteudo = Path(ambiente.banco).read_bytes()
     assert emitida["chave"].encode() not in conteudo
-    assert emitida["chave"].split("_")[2].encode() not in conteudo
+    # O segredo é base64url e pode conter "_": separa só nos dois primeiros.
+    segredo = emitida["chave"].split("_", 2)[2]
+    assert len(segredo) == 43 and segredo.encode() not in conteudo
 
 
 # ----------------------------------------------------------------------
@@ -375,7 +379,9 @@ def test_swagger_e_openapi(ambiente):
     assert not any(p.startswith("/admin") for p in o["paths"])  # administração fora da documentação pública
     assert o["paths"]["/v1/calculo/auditoria-nfe"]["post"]["requestBody"]["content"].keys() == {"application/xml"}
     seguras = [p for p, ops in o["paths"].items() for op in ops.values() if op.get("security")]
-    assert set(seguras) == {p for p in o["paths"] if p.startswith("/v1")}
+    # Todas as rotas /v1 exigem chave, menos o resgate, que é como o comprador obtém a chave.
+    assert set(seguras) == {p for p in o["paths"] if p.startswith("/v1")} - {"/v1/resgate"}
+    assert "/webhooks/mercadopago" not in o["paths"]
 
 
 def test_documentacao_administrativa_opcional(tmp_path):
