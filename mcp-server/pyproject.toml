@@ -15,7 +15,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Agente classificador fiscal (Claude via API da Anthropic)
+agente = [
+    "anthropic[mcp]>=2.11",
+]
 dev = [
+    "anthropic[mcp]>=2.11",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "respx>=0.21",
@@ -23,6 +28,7 @@ dev = [
 
 [project.scripts]
 rtc-mcp = "rtc_mcp.server:main"
+rtc-classificador = "rtc_mcp.classificador:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rtc_mcp"]

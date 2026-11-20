@@ -22,6 +22,7 @@ saída e explica a fundamentação, e os valores vêm sempre da calculadora ofic
 | `consultar_ncm` / `consultar_nbs` | regime regular | Descrição da mercadoria ou do serviço |
 | `listar_situacoes_tributarias` | regime regular | CSTs com as cClassTrib aninhadas (CBS/IBS ou IS) |
 | `consultar_classificacao_tributaria` | regime regular | Detalhe de uma cClassTrib |
+| `listar_classificacoes_aplicaveis_ncm` | regime regular | Separa as cClassTrib cujo anexo inclui a NCM das que não restringem NCM |
 | `listar_classificacoes_por_cst` / `listar_classificacoes_por_nbs` | regime regular | cClassTrib candidatas |
 | `verificar_ncm_aplicavel` / `verificar_nbs_aplicavel` | regime regular | Confere a combinação NCM/NBS × cClassTrib |
 | `consultar_fundamentacao_legal` | regime regular | Texto e referência normativa, com filtro por cClassTrib/CST |
@@ -116,8 +117,8 @@ npx @modelcontextprotocol/inspector .venv/bin/rtc-mcp
 > "Vendo 20 kg de arroz (NCM 1006.30.21) em Porto Alegre em março de 2027 por R$ 100. Quanto de CBS e IBS
 > incide e por quê?"
 
-Fluxo esperado do agente: `consultar_ncm` → `listar_situacoes_tributarias` → `verificar_ncm_aplicavel` (para a
-cClassTrib escolhida) → `consultar_aliquotas_referencia` → `calcular_tributos_regime_geral` →
+Fluxo esperado do agente: `consultar_ncm` → `listar_classificacoes_aplicaveis_ncm` → `verificar_ncm_aplicavel`
+(para a cClassTrib escolhida) → `consultar_aliquotas_referencia` → `calcular_tributos_regime_geral` →
 `consultar_fundamentacao_legal`. A resposta final cita os valores da calculadora, a cClassTrib, o dispositivo
 legal e a versão da base.
 
@@ -131,6 +132,57 @@ d'água de cancelada, fica em `~/rtc-danfse/danfse-<Id da NFS-e>.pdf`.
 No transporte HTTP remoto, o arquivo é gravado na máquina do servidor MCP. Para que o cliente receba o PDF, use
 `incluir_pdf_base64=true`.
 
+## Agente classificador fiscal
+
+`rtc-classificador` recebe a descrição de um item e o contexto da operação e propõe NCM/NBS, CST e cClassTrib
+de CBS/IBS, com a fundamentação legal. Ele usa o Claude (Claude Opus 5.5, pela API da Anthropic) com as
+ferramentas de consulta deste servidor MCP, iniciado automaticamente como subprocesso.
+
+```bash
+pip install -e ".[agente]"
+export ANTHROPIC_API_KEY=...        # ou: ant auth login
+rtc-classificador "arroz branco polido, pacote 5 kg" --data 2027-03-10 \
+  --contexto "venda de supermercado a consumidor final"
+```
+
+Opções: `--ncm`/`--nbs` (quando o código já é conhecido), `--contexto` (adquirente, finalidade, regime,
+destino), `--esforco` (`low` a `max`, padrão `high`), `--json` (saída estruturada) e `--silencioso` (oculta as
+ferramentas chamadas). Também pode ser usado em código: `await classificar(descricao, data=..., contexto=...)`.
+
+Como ele chega à classificação:
+
+1. Confirma ou propõe a NCM/NBS e compara a descrição oficial com o item.
+2. Levanta as candidatas. Para mercadorias, `listar_classificacoes_aplicaveis_ncm` separa as cClassTrib cujo
+   anexo inclui a NCM (por exemplo, a cesta básica) das que dependem só do contexto da operação.
+3. Escolhe considerando o contexto. Condições não informadas viram premissas ou perguntas, nunca suposições.
+4. Busca o dispositivo legal e devolve a resposta num esquema JSON fixo (structured outputs).
+
+**Conferência independente do modelo:** depois da resposta, o próprio código confere na calculadora se a
+cClassTrib existe, se pertence ao CST e se aceita a NCM/NBS proposta. Uma falha nessa conferência, confiança
+abaixo de "alta" ou falta de informação marcam o resultado com `revisaoHumanaRecomendada`, e a CLI sai com
+código 2. Uma classificação proposta por IA é um apoio à decisão; a responsabilidade fiscal continua com o
+contribuinte.
+
+Exemplo de saída (ilustrativo, no formato da CLI):
+
+```text
+Item: Arroz branco polido, pacote de 5 kg
+Status: classificado  |  Confiança: alta
+NCM: 10063021  NBS: -
+CST: 200  cClassTrib: 200003  Vendas de produtos destinados à alimentação humana (Anexo I)
+Tratamento: Alíquota zero
+Redução: CBS 100.0%  IBS UF 100.0%  IBS Mun 100.0%
+Fundamentação: LC 214/2025, art. 125: "Ficam reduzidas a zero as alíquotas do IBS e da CBS ..."
+...
+Conferência na calculadora:
+  - CST, cClassTrib e NCM/NBS confirmados na calculadora.
+Classificação confirmada.
+```
+
+Detalhes técnicos: tool runner do SDK `anthropic` (que usa message threads), pensamento adaptativo, cache de
+prompt e fallback automático do servidor em caso de recusa indevida (`fallbacks: "default"`). Para ver o log do
+servidor MCP, defina `RTC_DEBUG=1`.
+
 ## Testes
 
 ```bash
@@ -138,4 +190,6 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Os testes simulam as APIs com `respx` e não precisam das calculadoras em execução.
+Os testes do servidor simulam as APIs com `respx` e não precisam das calculadoras em execução. Os testes de
+integração do classificador usam um servidor local que imita a API da Anthropic (sem chave), o `rtc-mcp` real e
+a calculadora do regime regular; são pulados quando ela não está acessível em `RTC_REGIME_GERAL_URL`.

@@ -8,6 +8,7 @@ saída e explicar a fundamentação; a conta é sempre da calculadora.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import json
 import logging
@@ -69,6 +70,9 @@ GERACAO_ARQUIVO = ToolAnnotations(
 Resultado = dict[str, Any]
 
 SITUACOES_DANFSE = {"valida": 0, "substituida": 1, "cancelada": 2}
+
+# NCM que não existe: só classificações sem anexo de NCMs a aceitam.
+NCM_INEXISTENTE = "00000000"
 
 
 def _nome_padrao_danfse(xml: str) -> str:
@@ -288,6 +292,73 @@ def criar_servidor(cliente: RtcClient | None = None) -> Any:
             "calculadora/dados-abertos/classificacoes-tributarias/ncm-aplicavel",
             params={"cClassTrib": c_class_trib, "ncm": ncm, "dataOcorrenciaFatoGerador": data},
         )
+
+    @mcp.tool(annotations=LEITURA)
+    async def listar_classificacoes_aplicaveis_ncm(ncm: Ncm, data: Data) -> Resultado:
+        """Separa as cClassTrib de CBS/IBS que podem ser usadas com uma NCM em dois grupos.
+
+        - "doAnexo": classificações que têm anexo de NCMs e cujo anexo inclui esta NCM. É o sinal
+          mais forte de tratamento específico (por exemplo, cesta básica, medicamentos, insumos
+          agropecuários), mas várias exigem também uma condição da operação ou do adquirente.
+        - "semAnexo": classificações que não restringem NCM; dependem só do contexto da operação
+          (tipo de adquirente, regime, destino etc.) e incluem a tributação integral (000001).
+
+        Classificações com anexo que não incluem a NCM ficam de fora, assim como as exclusivas de NBS.
+        Prefira esta ferramenta a chamar verificar_ncm_aplicavel uma a uma.
+        """
+        consulta_ncm, catalogo, por_cst = await asyncio.gather(
+            regime("GET", "calculadora/dados-abertos/ncm", params={"ncm": ncm, "data": data}),
+            regime("GET", "calculadora/dados-abertos/classificacoes-tributarias/cbs-ibs", params={"data": data}),
+            regime("GET", "calculadora/dados-abertos/situacoes-tributarias/cbs-ibs", params={"data": data}),
+        )
+        csts: dict[str, list[str]] = {}
+        for situacao in por_cst["dados"] or []:
+            for classificacao in situacao.get("classificacoesTributarias") or []:
+                csts.setdefault(classificacao["codigo"], []).append(situacao["codigo"])
+
+        candidatas = [c for c in catalogo["dados"] or [] if c.get("nomenclatura") != "NBS"]
+        limite = asyncio.Semaphore(16)
+
+        async def aplicavel(c_class_trib: str, codigo_ncm: str) -> bool:
+            async with limite:
+                r = await regime(
+                    "GET",
+                    "calculadora/dados-abertos/classificacoes-tributarias/ncm-aplicavel",
+                    params={"cClassTrib": c_class_trib, "ncm": codigo_ncm, "dataOcorrenciaFatoGerador": data},
+                )
+            return bool((r["dados"] or {}).get("valido"))
+
+        # Uma classificação sem anexo aceita qualquer NCM, inclusive uma inexistente; com anexo, rejeita.
+        resultados = await asyncio.gather(
+            *(aplicavel(c["codigo"], ncm) for c in candidatas),
+            *(aplicavel(c["codigo"], NCM_INEXISTENTE) for c in candidatas),
+        )
+        validas, aceita_qualquer = resultados[: len(candidatas)], resultados[len(candidatas) :]
+
+        do_anexo: list[dict[str, Any]] = []
+        sem_anexo: list[dict[str, Any]] = []
+        for c, valida, generica in zip(candidatas, validas, aceita_qualquer):
+            if not valida:
+                continue
+            resumo = {
+                "cClassTrib": c["codigo"],
+                "cst": csts.get(c["codigo"], []),
+                "descricao": c.get("descricao"),
+                "tratamento": c.get("descricaoTratamentoTributario"),
+            }
+            if generica:
+                sem_anexo.append(resumo)
+            else:
+                resumo["reducao"] = {
+                    "cbs": c.get("percentualReducaoCbs"),
+                    "ibsUf": c.get("percentualReducaoIbsUf"),
+                    "ibsMun": c.get("percentualReducaoIbsMun"),
+                }
+                do_anexo.append(resumo)
+        return {
+            "dados": {"ncm": consulta_ncm["dados"], "doAnexo": do_anexo, "semAnexo": sem_anexo},
+            "metadados": catalogo["metadados"],
+        }
 
     @mcp.tool(annotations=LEITURA)
     async def verificar_nbs_aplicavel(c_class_trib: CClassTrib, nbs: Nbs, data: Data) -> Resultado:

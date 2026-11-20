@@ -359,3 +359,49 @@ def test_nome_padrao_sem_id_usa_data_e_hora():
 
     assert _nome_padrao_danfse('<ns:infNFSe Id="A/B 1">') == "danfse-A_B_1.pdf"
     assert re.fullmatch(r"danfse-\d{8}-\d{6}\.pdf", _nome_padrao_danfse("<NFSe/>"))
+
+
+@respx.mock
+async def test_classificacoes_aplicaveis_ncm_separa_anexo_de_genericas(servidor):
+    base = f"{REG}/calculadora/dados-abertos"
+    respx.get(f"{base}/ncm").mock(return_value=httpx.Response(200, json={"posicao": "Arroz."}))
+    respx.get(f"{base}/classificacoes-tributarias/cbs-ibs").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"codigo": "000001", "nomenclatura": "NBS ou NCM", "descricao": "Integral"},
+                {"codigo": "200003", "nomenclatura": "NCM", "descricao": "Cesta básica", "percentualReducaoCbs": 100.0},
+                {"codigo": "200035", "nomenclatura": "NCM", "descricao": "Outro anexo"},
+                {"codigo": "200028", "nomenclatura": "NBS", "descricao": "Educação"},
+            ],
+        )
+    )
+    respx.get(f"{base}/situacoes-tributarias/cbs-ibs").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"codigo": "000", "classificacoesTributarias": [{"codigo": "000001"}]},
+                {"codigo": "200", "classificacoesTributarias": [{"codigo": "200003"}, {"codigo": "200035"}]},
+            ],
+        )
+    )
+    # Sem anexo: aceita qualquer NCM. Com anexo: só as listadas (200003 lista o arroz; 200035 não).
+    validas = {("000001", "10063021"), ("000001", "00000000"), ("200003", "10063021")}
+
+    def aplicavel(requisicao):
+        p = requisicao.url.params
+        return httpx.Response(200, json={"valido": (p["cClassTrib"], p["ncm"]) in validas})
+
+    rota = respx.get(f"{base}/classificacoes-tributarias/ncm-aplicavel").mock(side_effect=aplicavel)
+    erro, corpo = await chamar(
+        servidor, "listar_classificacoes_aplicaveis_ncm", {"ncm": "10063021", "data": "2027-01-01"}
+    )
+
+    assert not erro
+    dados = corpo["dados"]
+    assert dados["ncm"] == {"posicao": "Arroz."}
+    assert [(c["cClassTrib"], c["cst"]) for c in dados["doAnexo"]] == [("200003", ["200"])]
+    assert dados["doAnexo"][0]["reducao"]["cbs"] == 100.0
+    assert [c["cClassTrib"] for c in dados["semAnexo"]] == ["000001"]
+    # A classificação exclusiva de NBS não é consultada.
+    assert all(c.request.url.params["cClassTrib"] != "200028" for c in rota.calls)
