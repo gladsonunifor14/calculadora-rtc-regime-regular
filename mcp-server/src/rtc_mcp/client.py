@@ -134,6 +134,7 @@ class RtcClient:
         conteudo: str | None = None,
         headers: dict[str, str] | None = None,
         binario: bool = False,
+        aceitar_422: bool = False,
     ) -> dict[str, Any]:
         url = f"{base}/{caminho.lstrip('/')}"
         try:
@@ -156,6 +157,9 @@ class RtcClient:
                 "está correta."
             ) from exc
 
+        if aceitar_422 and resposta.status_code in (400, 422):
+            # Erros de validação da entrada voltam como dados, para quem precisa deles estruturados.
+            return {"dados": _corpo(resposta), "metadados": _metadados(resposta), "status": resposta.status_code}
         if resposta.status_code == 404:
             raise CalculadoraError(f"Não encontrado (HTTP 404): {metodo} {caminho}. {_resumo_erro(resposta)}")
         if resposta.is_error:
