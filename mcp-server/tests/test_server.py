@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 from typing import Any
 
 import httpx
@@ -14,12 +16,28 @@ from rtc_mcp.server import ToolError, criar_servidor
 
 REG = "http://regime.test/api"
 SN = "http://simples.test/api"
+DANFSE = "http://danfse.test"
+PDF = b"%PDF-1.7 conteudo de teste"
+NFSE = '<NFSe versao="1.00"><infNFSe Id="NFS3550308123" dhProc="2026-07-14T10:00:00-03:00"></infNFSe></NFSe>'
 CABECALHOS = {"X-CALC-APP-VERSION": "1.6.1", "X-CALC-DB-VERSION": "2026.11.01"}
 
 
 @pytest.fixture
-def servidor():
-    cliente = RtcClient(Config(regime_geral_url=REG, simples_nacional_url=SN, timeout=5))
+def pasta_pdf(tmp_path):
+    return tmp_path / "pdfs"
+
+
+@pytest.fixture
+def servidor(pasta_pdf):
+    cliente = RtcClient(
+        Config(
+            regime_geral_url=REG,
+            simples_nacional_url=SN,
+            timeout=5,
+            danfse_url=DANFSE,
+            danfse_dir=str(pasta_pdf),
+        )
+    )
     return criar_servidor(cliente)
 
 
@@ -58,6 +76,7 @@ async def test_lista_todas_as_ferramentas(servidor):
         "validar_xml_documento",
         "listar_atividades_simples_nacional",
         "consultar_versoes",
+        "gerar_danfse",
     } <= nomes
 
 
@@ -232,7 +251,111 @@ async def test_versoes_toleram_calculadora_indisponivel(servidor):
         return_value=httpx.Response(200, json={"versaoApp": "1.6.1"})
     )
     respx.get(f"{SN}/versao").mock(side_effect=httpx.ConnectError("recusada"))
+    respx.get(f"{DANFSE}/health/ready").mock(return_value=httpx.Response(200, json={"status": "ok"}))
     erro, corpo = await chamar(servidor, "consultar_versoes", {})
     assert not erro
     assert corpo["dados"]["regimeGeral"] == {"versaoApp": "1.6.1"}
     assert "indisponivel" in corpo["dados"]["simplesNacional"]
+    assert corpo["dados"]["geradorDanfse"] == {"status": "ok"}
+
+
+# ----------------------------------------------------------------------
+# gerar_danfse
+# ----------------------------------------------------------------------
+
+
+def _mock_danfse(resposta: httpx.Response | None = None):
+    return respx.post(f"{DANFSE}/api/danfse").mock(
+        return_value=resposta or httpx.Response(200, content=PDF, headers={"Content-Type": "application/pdf"})
+    )
+
+
+@respx.mock
+async def test_gerar_danfse_grava_pdf_com_nome_do_id(servidor, pasta_pdf):
+    rota = _mock_danfse()
+    erro, corpo = await chamar(servidor, "gerar_danfse", {"xml": NFSE})
+
+    assert not erro
+    destino = pasta_pdf / "danfse-NFS3550308123.pdf"
+    assert corpo["dados"] == {
+        "arquivo": str(destino),
+        "tamanhoBytes": len(PDF),
+        "situacao": "valida",
+        "canhoto": True,
+    }
+    assert destino.read_bytes() == PDF
+    requisicao = rota.calls.last.request
+    assert requisicao.content == NFSE.encode()
+    assert requisicao.headers["content-type"] == "application/xml"
+    assert dict(requisicao.url.params) == {"stc": "0", "canhoto": "true"}
+
+
+@respx.mock
+async def test_gerar_danfse_situacao_canhoto_e_base64(servidor):
+    rota = _mock_danfse()
+    erro, corpo = await chamar(
+        servidor,
+        "gerar_danfse",
+        {"xml": NFSE, "situacao": "cancelada", "canhoto": False, "incluir_pdf_base64": True},
+    )
+    assert not erro
+    assert dict(rota.calls.last.request.url.params) == {"stc": "2", "canhoto": "false"}
+    assert base64.b64decode(corpo["dados"]["pdfBase64"]) == PDF
+
+
+@respx.mock
+async def test_gerar_danfse_nunca_sobrescreve(servidor, pasta_pdf):
+    _mock_danfse()
+    pasta_pdf.mkdir(parents=True)
+    (pasta_pdf / "nota.pdf").write_bytes(b"original")
+
+    _, corpo = await chamar(servidor, "gerar_danfse", {"xml": NFSE, "nome_arquivo": "nota"})
+
+    assert corpo["dados"]["arquivo"] == str(pasta_pdf / "nota-1.pdf")
+    assert (pasta_pdf / "nota.pdf").read_bytes() == b"original"
+
+
+@respx.mock
+async def test_gerar_danfse_le_xml_de_arquivo(servidor, tmp_path):
+    rota = _mock_danfse()
+    origem = tmp_path / "nota.xml"
+    origem.write_text(NFSE, encoding="utf-8")
+    erro, _ = await chamar(servidor, "gerar_danfse", {"caminho_xml": str(origem)})
+    assert not erro
+    assert rota.calls.last.request.content == NFSE.encode()
+
+
+async def test_gerar_danfse_exige_exatamente_uma_origem(servidor, tmp_path):
+    with respx.mock(assert_all_called=False) as mock:
+        erro, texto = await chamar(servidor, "gerar_danfse", {})
+        assert erro and "exatamente um" in texto
+        erro, texto = await chamar(servidor, "gerar_danfse", {"xml": NFSE, "caminho_xml": "a.xml"})
+        assert erro and "exatamente um" in texto
+        erro, texto = await chamar(servidor, "gerar_danfse", {"caminho_xml": str(tmp_path / "x.txt")})
+        assert erro and ".xml" in texto
+        erro, _ = await chamar(servidor, "gerar_danfse", {"xml": NFSE, "nome_arquivo": "../fora.pdf"})
+        assert erro
+        assert not mock.calls
+
+
+@respx.mock
+async def test_gerar_danfse_repassa_erro_do_gerador(servidor, pasta_pdf):
+    _mock_danfse(httpx.Response(400, json={"sucesso": False, "mensagem": "infNFSe Id is empty"}))
+    erro, texto = await chamar(servidor, "gerar_danfse", {"xml": "<NFSe/>"})
+    assert erro
+    assert "HTTP 400" in texto and "infNFSe Id is empty" in texto
+    assert not pasta_pdf.exists()
+
+
+@respx.mock
+async def test_gerar_danfse_recusa_resposta_que_nao_e_pdf(servidor):
+    _mock_danfse(httpx.Response(200, content=b"<html>proxy</html>"))
+    erro, texto = await chamar(servidor, "gerar_danfse", {"xml": NFSE})
+    assert erro and "não é um PDF" in texto
+
+
+def test_nome_padrao_sem_id_usa_data_e_hora():
+    from rtc_mcp.server import _nome_padrao_danfse
+
+    assert _nome_padrao_danfse('<ns:infNFSe Id="A/B 1">') == "danfse-A_B_1.pdf"
+    assert re.fullmatch(r"danfse-\d{8}-\d{6}\.pdf", _nome_padrao_danfse("<NFSe/>"))

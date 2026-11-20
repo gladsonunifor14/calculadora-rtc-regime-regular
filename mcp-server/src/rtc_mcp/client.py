@@ -1,4 +1,4 @@
-"""Cliente HTTP das duas calculadoras (regime regular e Simples Nacional).
+"""Cliente HTTP das calculadoras (regime regular e Simples Nacional) e do gerador de DANFSe.
 
 Toda resposta bem-sucedida é devolvida como ``{"dados": ..., "metadados": {...}}``.
 Os metadados carregam a versão da aplicação e da base de dados (cabeçalhos
@@ -22,6 +22,9 @@ import httpx
 
 REGIME_GERAL_URL_PADRAO = "http://localhost:8080/api"
 SIMPLES_NACIONAL_URL_PADRAO = "http://localhost:8082/api"
+# O gerador usa 8080 por padrão, que conflita com o regime regular; rode-o com SERVER_PORT=8083.
+DANFSE_URL_PADRAO = "http://localhost:8083"
+DANFSE_DIR_PADRAO = os.path.join(os.path.expanduser("~"), "rtc-danfse")
 TIMEOUT_PADRAO = 30.0
 LIMITE_CORPO_ERRO = 4000
 
@@ -35,6 +38,8 @@ class Config:
     regime_geral_url: str
     simples_nacional_url: str
     timeout: float
+    danfse_url: str = DANFSE_URL_PADRAO
+    danfse_dir: str = DANFSE_DIR_PADRAO
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -42,6 +47,8 @@ class Config:
             regime_geral_url=os.environ.get("RTC_REGIME_GERAL_URL", REGIME_GERAL_URL_PADRAO).rstrip("/"),
             simples_nacional_url=os.environ.get("RTC_SIMPLES_NACIONAL_URL", SIMPLES_NACIONAL_URL_PADRAO).rstrip("/"),
             timeout=float(os.environ.get("RTC_TIMEOUT", TIMEOUT_PADRAO)),
+            danfse_url=os.environ.get("RTC_DANFSE_URL", DANFSE_URL_PADRAO).rstrip("/"),
+            danfse_dir=os.environ.get("RTC_DANFSE_DIR", DANFSE_DIR_PADRAO),
         )
 
 
@@ -103,12 +110,17 @@ class RtcClient:
         await self._http.aclose()
 
     async def regime_geral(self, metodo: str, caminho: str, **kwargs: Any) -> dict[str, Any]:
-        return await self._requisitar(self.config.regime_geral_url, "regime regular", metodo, caminho, **kwargs)
+        return await self._requisitar(
+            self.config.regime_geral_url, "calculadora do regime regular", metodo, caminho, **kwargs
+        )
 
     async def simples_nacional(self, metodo: str, caminho: str, **kwargs: Any) -> dict[str, Any]:
         return await self._requisitar(
-            self.config.simples_nacional_url, "Simples Nacional", metodo, caminho, **kwargs
+            self.config.simples_nacional_url, "calculadora do Simples Nacional", metodo, caminho, **kwargs
         )
+
+    async def danfse(self, metodo: str, caminho: str, **kwargs: Any) -> dict[str, Any]:
+        return await self._requisitar(self.config.danfse_url, "gerador de DANFSe", metodo, caminho, **kwargs)
 
     async def _requisitar(
         self,
@@ -121,6 +133,7 @@ class RtcClient:
         json_body: Any = None,
         conteudo: str | None = None,
         headers: dict[str, str] | None = None,
+        binario: bool = False,
     ) -> dict[str, Any]:
         url = f"{base}/{caminho.lstrip('/')}"
         try:
@@ -134,12 +147,12 @@ class RtcClient:
             )
         except httpx.TimeoutException as exc:
             raise CalculadoraError(
-                f"A calculadora do {nome} não respondeu em {self.config.timeout:.0f}s ({metodo} {url})."
+                f"{_inicial(nome)} não respondeu em {self.config.timeout:.0f}s ({metodo} {url})."
             ) from exc
         except httpx.TransportError as exc:
             raise CalculadoraError(
-                f"Não foi possível conectar à calculadora do {nome} em {base}. "
-                "Verifique se a aplicação está em execução (perfil offline) e se a URL configurada "
+                f"Não foi possível conectar: {nome} não está acessível em {base}. "
+                "Verifique se o serviço está em execução e se a URL configurada "
                 "está correta."
             ) from exc
 
@@ -147,10 +160,15 @@ class RtcClient:
             raise CalculadoraError(f"Não encontrado (HTTP 404): {metodo} {caminho}. {_resumo_erro(resposta)}")
         if resposta.is_error:
             raise CalculadoraError(
-                f"A calculadora do {nome} recusou a requisição (HTTP {resposta.status_code}) "
+                f"{_inicial(nome)} recusou a requisição (HTTP {resposta.status_code}) "
                 f"em {metodo} {caminho}: {_resumo_erro(resposta)}"
             )
-        return {"dados": _corpo(resposta), "metadados": _metadados(resposta)}
+        dados = resposta.content if binario else _corpo(resposta)
+        return {"dados": dados, "metadados": _metadados(resposta)}
+
+
+def _inicial(texto: str) -> str:
+    return texto[:1].upper() + texto[1:]
 
 
 def _resumo_erro(resposta: httpx.Response) -> str:

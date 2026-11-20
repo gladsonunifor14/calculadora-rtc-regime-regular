@@ -8,8 +8,12 @@ saída e explicar a fundamentação; a conta é sempre da calculadora.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import Field
@@ -27,7 +31,8 @@ from mcp.types import ToolAnnotations
 
 INSTRUCOES = """\
 Ferramentas das calculadoras oficiais da Reforma Tributária do Consumo (EC 132/2023 e LC 214/2025):
-CBS, IBS (estadual e municipal) e Imposto Seletivo, no regime regular e no Simples Nacional.
+CBS, IBS (estadual e municipal) e Imposto Seletivo, no regime regular e no Simples Nacional,
+e geração do DANFSe (PDF da NFS-e).
 
 Regras de uso:
 - Nunca calcule tributo por conta própria. Use calcular_tributos_regime_geral ou
@@ -38,6 +43,7 @@ Regras de uso:
 - Cite cClassTrib, CST, fundamentação legal e as versões em "metadados" ao apresentar um resultado.
 - Se "metadados.avisoDadosSimulados" estiver presente, avise que os valores são simulados.
 - Erros por item (códigos REG-xxx e VSN-xxx) podem ser detalhados com as ferramentas descrever_erro_*.
+- gerar_danfse produz o PDF da NFS-e a partir do XML autorizado e devolve o caminho do arquivo gravado.
 """
 
 Data = Annotated[
@@ -55,7 +61,38 @@ LEITURA = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_
 # Os cálculos não alteram estado nenhum: são simulações sobre tabelas somente leitura.
 CALCULO = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
 
+# Grava um arquivo novo no disco local, sem apagar nem sobrescrever nada.
+GERACAO_ARQUIVO = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
+)
+
 Resultado = dict[str, Any]
+
+SITUACOES_DANFSE = {"valida": 0, "substituida": 1, "cancelada": 2}
+
+
+def _nome_padrao_danfse(xml: str) -> str:
+    """danfse-<Id da infNFSe>.pdf, ou danfse-<data e hora>.pdf se o Id não for encontrado."""
+    achado = re.search(r"<(?:\w+:)?infNFSe\b[^>]*\bId\s*=\s*[\"']([^\"']+)[\"']", xml)
+    identificador = re.sub(r"[^\w.-]", "_", achado.group(1))[:80] if achado else ""
+    if not identificador:
+        identificador = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"danfse-{identificador}.pdf"
+
+
+def _gravar_sem_sobrescrever(diretorio: Path, nome: str, conteudo: bytes) -> Path:
+    if not nome.lower().endswith(".pdf"):
+        nome += ".pdf"
+    base, extensao = nome[:-4], nome[-4:]
+    for n in range(1000):
+        destino = diretorio / (nome if n == 0 else f"{base}-{n}{extensao}")
+        try:
+            with destino.open("xb") as arquivo:  # "x" falha se o arquivo já existe
+                arquivo.write(conteudo)
+            return destino
+        except FileExistsError:
+            continue
+    raise OSError(f"muitos arquivos com o nome {nome}")
 
 
 def criar_servidor(cliente: RtcClient | None = None) -> Any:
@@ -398,12 +435,100 @@ def criar_servidor(cliente: RtcClient | None = None) -> Any:
         )
 
     # ------------------------------------------------------------------
+    # DANFSe (documento auxiliar da NFS-e em PDF)
+    # ------------------------------------------------------------------
+
+    @mcp.tool(annotations=GERACAO_ARQUIVO)
+    async def gerar_danfse(
+        xml: Annotated[
+            str | None,
+            Field(description="XML completo da NFS-e autorizada (elemento NFSe com infNFSe). Use este ou caminho_xml"),
+        ] = None,
+        caminho_xml: Annotated[
+            str | None,
+            Field(description="Caminho de um arquivo .xml com a NFS-e, na máquina do servidor MCP. Use este ou xml"),
+        ] = None,
+        situacao: Annotated[
+            Literal["valida", "substituida", "cancelada"],
+            Field(description="Situação da nota; substituída e cancelada recebem marca d'água no PDF"),
+        ] = "valida",
+        canhoto: Annotated[bool, Field(description="Inclui o canhoto de recebimento")] = True,
+        nome_arquivo: Annotated[
+            str | None,
+            Field(
+                pattern=r"^[\w.-]{1,100}$",
+                description="Nome do PDF a gravar (sem diretório). Padrão: danfse-<Id da NFS-e>.pdf",
+            ),
+        ] = None,
+        incluir_pdf_base64: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Devolve também o PDF em base64. Só use quando o cliente não tem acesso ao disco do "
+                    "servidor MCP (transporte HTTP remoto): o conteúdo é grande"
+                )
+            ),
+        ] = False,
+    ) -> Resultado:
+        """Gera o DANFSe (Documento Auxiliar da NFS-e) em PDF a partir do XML de uma NFS-e.
+
+        O PDF é gravado no diretório configurado em RTC_DANFSE_DIR (padrão ~/rtc-danfse) e a
+        ferramenta devolve o caminho do arquivo. Nunca sobrescreve um arquivo existente.
+        Para conferir a estrutura do XML antes, use validar_xml_documento com tipo='nfse' e
+        subtipo='nota'. Erros de conteúdo (por exemplo, Id da infNFSe vazio) voltam com a
+        mensagem do gerador para correção.
+        """
+        if (xml is None) == (caminho_xml is None):
+            raise ToolError("Informe exatamente um entre 'xml' e 'caminho_xml'.")
+        if caminho_xml is not None:
+            origem = Path(caminho_xml).expanduser()
+            if origem.suffix.lower() != ".xml":
+                raise ToolError("caminho_xml deve apontar para um arquivo .xml.")
+            try:
+                xml = origem.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ToolError(f"Não foi possível ler {origem}: {exc}") from exc
+
+        try:
+            r = await rtc.danfse(
+                "POST",
+                "api/danfse",
+                params={"stc": SITUACOES_DANFSE[situacao], "canhoto": "true" if canhoto else "false"},
+                conteudo=xml,
+                headers={"Content-Type": "application/xml"},
+                binario=True,
+            )
+        except CalculadoraError as exc:
+            raise ToolError(str(exc)) from exc
+
+        pdf: bytes = r["dados"]
+        if not pdf.startswith(b"%PDF"):
+            raise ToolError("O gerador de DANFSe respondeu com sucesso, mas o conteúdo não é um PDF.")
+
+        diretorio = Path(rtc.config.danfse_dir).expanduser()
+        try:
+            diretorio.mkdir(parents=True, exist_ok=True)
+            destino = _gravar_sem_sobrescrever(diretorio, nome_arquivo or _nome_padrao_danfse(xml), pdf)
+        except OSError as exc:
+            raise ToolError(f"Não foi possível gravar o PDF em {diretorio}: {exc}") from exc
+
+        dados: dict[str, Any] = {
+            "arquivo": str(destino),
+            "tamanhoBytes": len(pdf),
+            "situacao": situacao,
+            "canhoto": canhoto,
+        }
+        if incluir_pdf_base64:
+            dados["pdfBase64"] = base64.b64encode(pdf).decode("ascii")
+        return {"dados": dados, "metadados": r["metadados"]}
+
+    # ------------------------------------------------------------------
     # Versões
     # ------------------------------------------------------------------
 
     @mcp.tool(annotations=LEITURA)
     async def consultar_versoes() -> Resultado:
-        """Informa a versão da aplicação e da base de dados das duas calculadoras e se estão acessíveis.
+        """Informa a versão das duas calculadoras e se elas e o gerador de DANFSe estão acessíveis.
 
         Registre essas versões junto de qualquer resultado: as tabelas mudam ao longo da transição.
         """
@@ -416,6 +541,10 @@ def criar_servidor(cliente: RtcClient | None = None) -> Any:
                 versoes[nome] = (await chamada("GET", caminho))["dados"]
             except CalculadoraError as exc:
                 versoes[nome] = {"indisponivel": str(exc)}
+        try:
+            versoes["geradorDanfse"] = (await rtc.danfse("GET", "health/ready"))["dados"]
+        except CalculadoraError as exc:
+            versoes["geradorDanfse"] = {"indisponivel": str(exc)}
         return {"dados": versoes, "metadados": {}}
 
     return mcp
