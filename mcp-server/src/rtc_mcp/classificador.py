@@ -19,6 +19,7 @@ import json
 import os
 import sys
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
 
@@ -130,6 +131,73 @@ class ResultadoClassificacao(BaseModel):
     modelo: str
 
 
+@dataclass
+class Registro:
+    """Registro detalhado de uma execução, preenchido à medida que ela avança (também em caso de erro).
+
+    Usado pela avaliação para guardar a transcrição, o uso de tokens e o modelo que respondeu.
+    """
+
+    transcricao: list[dict[str, Any]] = field(default_factory=list)
+    uso: dict[str, int] = field(
+        default_factory=lambda: {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+    )
+    modelos: list[str] = field(default_factory=list)
+    stop_reasons: list[str | None] = field(default_factory=list)
+    chamadas_ferramenta: int = 0
+
+    def registrar_mensagem(self, mensagem: Any) -> None:
+        self.modelos.append(getattr(mensagem, "model", None))
+        self.stop_reasons.append(getattr(mensagem, "stop_reason", None))
+        uso = getattr(mensagem, "usage", None)
+        for chave in self.uso:
+            self.uso[chave] += int(getattr(uso, chave, 0) or 0)
+        pensamento = ""
+        for bloco in mensagem.content:
+            tipo = getattr(bloco, "type", None)
+            if tipo == "thinking":
+                pensamento += getattr(bloco, "thinking", "") or ""
+            elif tipo == "text":
+                self._turno({"role": "assistant", "content": bloco.text}, pensamento)
+                pensamento = ""
+            elif tipo == "tool_use":
+                self.chamadas_ferramenta += 1
+                self._turno(
+                    {
+                        "role": "tool_call",
+                        "name": bloco.name,
+                        "content": json.dumps(bloco.input, ensure_ascii=False, indent=2),
+                    },
+                    pensamento,
+                )
+                pensamento = ""
+
+    def _turno(self, turno: dict[str, Any], pensamento: str) -> None:
+        if pensamento:
+            turno["thinking"] = pensamento
+        self.transcricao.append(turno)
+
+
+class _SessaoRegistrada:
+    """Repassa as chamadas de ferramenta à sessão MCP e registra os resultados."""
+
+    def __init__(self, sessao: Any, registro: Registro):
+        self._sessao = sessao
+        self._registro = registro
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        resultado = await self._sessao.call_tool(name, arguments, **kwargs)
+        texto = "".join(getattr(c, "text", "") for c in (resultado.content or []))
+        erro = bool(getattr(resultado, "is_error", None) or getattr(resultado, "isError", False))
+        self._registro.transcricao.append({"role": "tool_result", "content": ("ERRO: " if erro else "") + texto})
+        return resultado
+
+
 class ErroClassificador(Exception):
     """Falha que impede a classificação."""
 
@@ -232,12 +300,18 @@ async def _executar(
     max_tokens: int,
     max_iteracoes: int,
     progresso: Any,
+    registro: Registro | None = None,
 ) -> tuple[Classificacao, list[str]]:
     disponiveis = {t.name: t for t in (await sessao.list_tools()).tools}
     faltando = [n for n in FERRAMENTAS if n not in disponiveis]
     if faltando:
         raise ErroClassificador(f"O servidor MCP não oferece as ferramentas: {', '.join(faltando)}")
-    ferramentas = [async_mcp_tool(disponiveis[n], sessao) for n in FERRAMENTAS]
+    pedido = montar_pedido(descricao, data, ncm, nbs, contexto)
+    sessao_ferramentas = sessao
+    if registro is not None:
+        registro.transcricao += [{"role": "system", "content": SISTEMA}, {"role": "user", "content": pedido}]
+        sessao_ferramentas = _SessaoRegistrada(sessao, registro)
+    ferramentas = [async_mcp_tool(disponiveis[n], sessao_ferramentas) for n in FERRAMENTAS]
 
     runner = cliente.beta.messages.tool_runner(
         model=modelo,
@@ -245,7 +319,7 @@ async def _executar(
         max_iterations=max_iteracoes,
         system=SISTEMA,
         tools=ferramentas,
-        messages=[{"role": "user", "content": montar_pedido(descricao, data, ncm, nbs, contexto)}],
+        messages=[{"role": "user", "content": pedido}],
         thinking={"type": "adaptive"},
         output_config={"effort": esforco, "format": formato_resposta()},
         cache_control={"type": "ephemeral"},
@@ -256,6 +330,8 @@ async def _executar(
     ultima = None
     async for mensagem in runner:
         ultima = mensagem
+        if registro is not None:
+            registro.registrar_mensagem(mensagem)
         if progresso:
             for bloco in mensagem.content:
                 if getattr(bloco, "type", None) == "tool_use":
@@ -283,6 +359,7 @@ async def classificar(
     cliente: Any = None,
     parametros_servidor: Any = None,
     progresso: Any = None,
+    registro: Registro | None = None,
 ) -> ResultadoClassificacao:
     """Classifica um item. `cliente` e `parametros_servidor` permitem injeção nos testes."""
     from anthropic import AsyncAnthropic
@@ -310,7 +387,7 @@ async def classificar(
             try:
                 classificacao, falhas = await _executar(
                     cliente, sessao, async_mcp_tool, descricao, data, ncm, nbs, contexto,
-                    modelo, esforco, max_tokens, max_iteracoes, progresso,
+                    modelo, esforco, max_tokens, max_iteracoes, progresso, registro,
                 )
             except Exception as exc:  # noqa: BLE001 - relançado abaixo, fora da sessão
                 erro = exc

@@ -193,3 +193,22 @@ pytest
 Os testes do servidor simulam as APIs com `respx` e não precisam das calculadoras em execução. Os testes de
 integração do classificador usam um servidor local que imita a API da Anthropic (sem chave), o `rtc-mcp` real e
 a calculadora do regime regular; são pulados quando ela não está acessível em `RTC_REGIME_GERAL_URL`.
+
+## Avaliação do classificador
+
+A pasta `avaliacao/` mede a qualidade do `rtc-classificador` em 41 casos (31 com resposta definida e 10 em que
+falta informação e o certo é pedir revisão). Os casos derivam dos pares NCM/NBS → cClassTrib dos testes oficiais
+e cada gabarito é conferido na calculadora; a lista para revisão está em [`avaliacao/CASOS.md`](avaliacao/CASOS.md).
+
+```bash
+pip install -e ".[agente]"
+python avaliacao/avaliar.py --aprovar-harness            # registra o harness aprovado
+python avaliacao/avaliar.py --casos arroz-varejo,dipirona,hotel --reps 1   # piloto
+python avaliacao/avaliar.py --reps 2                     # rodada completa (retomável)
+```
+
+A nota é programática, sem juiz de IA. Métrica principal: `acerto` (cClassTrib dentro do gabarito nos casos
+definidos; nos ambíguos, sinalizar revisão e propor uma classificação plausível). Também são medidos CST,
+NCM/NBS, revisão indevida, conferência na calculadora, recusas, tokens, custo e latência. Os resultados vão para
+`.claude/hillclimb/classificador/<variante>/` na raiz do repositório. Para mudar os casos, edite
+`avaliacao/casos_rascunho.py` e rode `python avaliacao/gerar_casos.py` com a calculadora em execução.
