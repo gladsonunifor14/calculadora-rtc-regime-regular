@@ -19,7 +19,15 @@ dependencies = [
 agente = [
     "anthropic[mcp]>=2.11",
 ]
+# API HTTP comercial (FastAPI): chaves expiráveis, cotas e Swagger
+api = [
+    "anthropic[mcp]>=2.11",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 dev = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
     "anthropic[mcp]>=2.11",
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -33,9 +41,10 @@ rtc-comparador = "rtc_mcp.agente_comparador:main"
 rtc-auditor = "rtc_mcp.agente_auditor:main"
 rtc-corretor = "rtc_mcp.agente_corretor:main"
 rtc-consultor = "rtc_mcp.agente_consultor:main"
+rtc-api = "rtc_api.app:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rtc_mcp"]
+packages = ["src/rtc_mcp", "src/rtc_api"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

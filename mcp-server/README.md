@@ -315,6 +315,80 @@ rtc-consultor "Como fica a venda de dispositivos médicos para hospital público
   fundamentação de memória, e também vão para revisão.
 - Não substitui parecer profissional para o caso concreto.
 
+## API HTTP comercial (`rtc-api`)
+
+Backend FastAPI que vende o acesso aos agentes e aos cálculos. Só responde a quem tem uma **chave de acesso
+expirável**, emitida pelo administrador depois da compra. Documentação interativa (Swagger) em `/docs` e ReDoc em
+`/redoc`.
+
+```bash
+pip install -e ".[api]"
+export RTC_API_ADMIN_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(48))")
+export RTC_API_PEPPER=$(python -c "import secrets; print(secrets.token_urlsafe(48))")
+export ANTHROPIC_API_KEY=...          # usado pelas rotas de agentes
+rtc-api --host 0.0.0.0 --port 8000
+```
+
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `RTC_API_ADMIN_TOKEN` | obrigatória | Token do administrador (32+ caracteres). Sem ela a API não sobe |
+| `RTC_API_PEPPER` | obrigatória | Segredo usado no hash das chaves (32+ caracteres). Trocar invalida todas as chaves |
+| `RTC_API_BANCO` | `rtc-api.db` | Arquivo SQLite das chaves e do consumo |
+| `RTC_API_PLANOS` | planos padrão | JSON com os planos (mesmo formato de `PLANOS_PADRAO` em `rtc_api/config.py`) |
+| `RTC_API_AGENTES_SIMULTANEOS` | `4` | Máximo de agentes de IA rodando ao mesmo tempo |
+| `RTC_API_DOCS_ADMIN` | desligado | `true` mostra as rotas de administração no Swagger |
+
+Também valem as variáveis das calculadoras (`RTC_REGIME_GERAL_URL` etc.).
+
+### Rotas
+
+| Rota | Escopo | O que faz |
+|---|---|---|
+| `GET /v1/conta` | qualquer | Plano, validade, limites e consumo da chave |
+| `POST /v1/calculo/comparacao-regimes` | `calculo` | Comparação Simples x regime regular (sem IA) |
+| `POST /v1/calculo/auditoria-nfe` | `calculo` | Auditoria de NF-e (corpo `application/xml`, sem IA) |
+| `POST /v1/calculo/diagnostico-operacao` | `calculo` | Diagnóstico dos erros de uma operação (sem IA) |
+| `POST /v1/agentes/{classificador,comparador,auditor,corretor,consultor}` | `agentes` | Os cinco agentes de IA |
+| `GET /saude` | pública | Disponibilidade da API e das calculadoras |
+
+### Venda e liberação das chaves
+
+Depois de confirmar a compra, o seu sistema (ou você) chama a rota administrativa:
+
+```bash
+curl -X POST https://sua-api/admin/chaves -H "X-Admin-Token: $RTC_API_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"cliente": "12345678000199", "referenciaCompra": "pedido-42", "plano": "completo", "validadeDias": 365}'
+```
+
+A resposta traz a chave completa (`rtc_<prefixo>_<segredo>`) **uma única vez**: entregue ao cliente, que a envia
+no cabeçalho `X-API-Key`. Outras rotas administrativas: listar (`GET /admin/chaves`), detalhar com consumo e
+últimas requisições (`GET /admin/chaves/{id}`), renovar (`POST /admin/chaves/{id}/renovar`, soma dias à
+validade), revogar (`POST /admin/chaves/{id}/revogar`) e ver os planos (`GET /admin/planos`).
+
+| Plano padrão | Escopos | Cota mensal de cálculo | Cota mensal de agentes | Por minuto |
+|---|---|---|---|---|
+| `calculo` | `calculo` | 5.000 | 0 | 60 |
+| `completo` | `calculo`, `agentes` | 5.000 | 300 | 30 |
+
+A emissão aceita `limites` próprios para uma chave e `expiraEm` no lugar de `validadeDias`.
+
+### Segurança e regras
+
+- **Chaves:** 256 bits de entropia. O banco guarda só o HMAC-SHA256 da chave com o pepper do servidor, nunca a
+  chave. Comparações em tempo constante. A chave completa nunca vai para o log, só o prefixo.
+- **Validade:** chave expirada ou revogada recebe 401 com o motivo. A renovação soma dias à validade (ou a partir
+  de agora, se já expirou). Chave revogada não pode ser renovada.
+- **Idempotência por compra:** uma segunda emissão com a mesma `referenciaCompra` devolve 409 com o id da chave
+  existente, sem gerar outra. Reenvios do sistema de vendas não duplicam chaves.
+- **Cota e limite por minuto:** conferidos e consumidos numa única transação SQLite, sem passar do limite com
+  requisições simultâneas. Só requisições com sucesso (2xx) consomem cota; as demais são estornadas.
+- **Erros:** formato *problem details* (RFC 9457). Erros 5xx não expõem detalhes internos. Corpos acima de 5 MB
+  recebem 413. O registro de requisições guarda rota, status e latência, nunca o conteúdo.
+- **Rotas administrativas:** ficam fora do Swagger público, a menos que `RTC_API_DOCS_ADMIN=true`.
+- **Produção:** rode atrás de um proxy com HTTPS. A página `/docs` carrega a interface do Swagger de
+  `cdn.jsdelivr.net`. O SQLite atende uma instância; para várias, migre o banco para PostgreSQL.
+
 ## Testes
 
 ```bash
