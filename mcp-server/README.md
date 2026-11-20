@@ -32,6 +32,7 @@ saída e explica a fundamentação, e os valores vêm sempre da calculadora ofic
 | `descrever_erro_simples_nacional` | Simples Nacional | Explica um código `VSN-xxx` |
 | `listar_atividades_simples_nacional` / `consultar_atividade_simples_nacional` | Simples Nacional | Atividades (cAtivSN) vigentes |
 | `gerar_danfse` | gerador de DANFSe | Gera o DANFSe (PDF da NFS-e) a partir do XML, com situação e canhoto, e grava o arquivo |
+| `diagnosticar_operacao` | regime regular | Erros estruturados de uma operação, inclusive quando ela é rejeitada inteira (HTTP 422) |
 | `auditar_nfe` | regime regular | Audita o IBS/CBS de uma NF-e/NFC-e: XSD, classificação, base, reduções, valores e totais |
 | `comparar_regimes_simples_regular` | Simples + regime regular | Compara o IBS/CBS no Simples e no regime regular, com créditos |
 | `consultar_versoes` | todas | Versão das calculadoras e disponibilidade dos três serviços |
@@ -262,6 +263,33 @@ O que a auditoria confere, item a item:
 
 As notas de teste em `tests/fixtures/` foram geradas com as calculadoras (`python tests/fixtures/gerar_nfe.py`)
 e passam no XSD; os testes de mutação alteram um campo por vez e conferem que a auditoria acusa o erro certo.
+
+## Agente corretor de erros
+
+`rtc-corretor` recebe uma operação que a calculadora rejeitou (o JSON de entrada do regime regular, montado por
+um ERP, por exemplo), corrige o que dá para corrigir com as tabelas oficiais e diagnostica de novo até zerar os
+erros. A operação corrigida é gravada em `<arquivo>.corrigida.json`; o original não é alterado.
+
+```bash
+pip install -e ".[agente]"
+rtc-corretor operacao.json
+```
+
+- **Corrige:** NCM/NBS inexistente ou mal formatada (REG-002), NCM não vinculada à cClassTrib (REG-011),
+  cClassTrib fora do CST (REG-006) e campos técnicos ausentes (VAL-001).
+- **Não inventa:** alíquotas nominais de 2027 em diante (REG-037), dados do Imposto Seletivo (REG-013) e
+  município/UF incompatíveis viram pendências com pergunta ao usuário.
+- **Erros em camadas:** a calculadora mostra um erro por vez em cada item, e a validação de campos obrigatórios
+  esconde as regras de negócio. O agente diagnostica de novo a cada rodada.
+- **Conferência pelo código:** depois da resposta, o código diagnostica a operação corrigida e a compara campo a
+  campo com a original (`rtc_mcp.correcao`). A correção é recusada se remover, acrescentar ou reordenar itens,
+  se mudar um campo sem declarar a correção, se o valor declarado não for o gravado ou se restarem erros não
+  declarados como pendência. Mudar base de cálculo, quantidade, valores, data ou id exige revisão humana. Só uma
+  operação sem erros e sem nenhuma dessas ocorrências sai como pronta (código 0).
+- **Sem erros, sem modelo:** se a operação já passa na calculadora, o modelo nem é chamado.
+- **Limite:** o corretor parte dos erros da calculadora. Uma classificação errada que a calculadora aceita (por
+  exemplo, um serviço com uma cClassTrib de mercadoria) não gera erro e não é corrigida; para isso, use o
+  classificador ou o auditor.
 
 ## Testes
 

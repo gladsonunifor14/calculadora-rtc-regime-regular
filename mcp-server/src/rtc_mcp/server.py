@@ -22,6 +22,7 @@ from pydantic import Field
 from .client import CalculadoraError, Config, RtcClient
 from .comparador import Cenario, ErroComparacao, comparar
 from .auditoria import ErroAuditoria, auditar
+from .correcao import ErroCorrecao, diagnosticar
 
 try:  # SDK MCP 2.x
     from mcp.server.mcpserver import MCPServer as _Servidor
@@ -46,6 +47,7 @@ Regras de uso:
 - Cite cClassTrib, CST, fundamentação legal e as versões em "metadados" ao apresentar um resultado.
 - Se "metadados.avisoDadosSimulados" estiver presente, avise que os valores são simulados.
 - Erros por item (códigos REG-xxx e VSN-xxx) podem ser detalhados com as ferramentas descrever_erro_*.
+- diagnosticar_operacao lista os erros estruturados de uma operação, mesmo quando ela é rejeitada inteira.
 - auditar_nfe confere o IBS/CBS de uma NF-e/NFC-e (XSD, classificação, base, valores e totais).
 - comparar_regimes_simples_regular compara o IBS/CBS no Simples e no regime regular (só IBS/CBS).
 - gerar_danfse produz o PDF da NFS-e a partir do XML autorizado e devolve o caminho do arquivo gravado.
@@ -508,6 +510,27 @@ def criar_servidor(cliente: RtcClient | None = None) -> Any:
             f"calculadora/simples-nacional/atividades/{codigo}",
             params={"data": data, "tpDoc": tp_doc, "cClassTrib": c_class_trib},
         )
+
+    # ------------------------------------------------------------------
+    # Diagnóstico de operações com erro
+    # ------------------------------------------------------------------
+
+    @mcp.tool(annotations=LEITURA)
+    async def diagnosticar_operacao(
+        operacao: Annotated[dict[str, Any], Field(description="Operação no formato OperacaoInput do regime regular")],
+    ) -> Resultado:
+        """Diagnostica uma operação do regime regular e devolve os erros de forma estruturada.
+
+        Ao contrário de calcular_tributos_regime_geral, não falha quando a operação é rejeitada inteira
+        (HTTP 422): devolve situacao ("sem_erros" ou "com_erros"), se ela foi rejeitada inteira, e a lista de
+        erros com escopo (operação ou item), número do item, código (REG-xxx, VAL-xxx), ponteiro do campo,
+        detalhe e a descrição do código. A calculadora mostra um erro por vez em cada item: depois de
+        corrigir, diagnostique de novo.
+        """
+        try:
+            return {"dados": await diagnosticar(rtc, operacao), "metadados": {}}
+        except ErroCorrecao as exc:
+            raise ToolError(str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Auditoria de NF-e/NFC-e
