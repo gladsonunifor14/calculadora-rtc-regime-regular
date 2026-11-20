@@ -23,10 +23,12 @@ agente = [
 api = [
     "anthropic[mcp]>=2.11",
     "fastapi>=0.115",
+    "mercadopago>=3.6",
     "uvicorn>=0.30",
 ]
 dev = [
     "fastapi>=0.115",
+    "mercadopago>=3.6",
     "uvicorn>=0.30",
     "anthropic[mcp]>=2.11",
     "pytest>=8",

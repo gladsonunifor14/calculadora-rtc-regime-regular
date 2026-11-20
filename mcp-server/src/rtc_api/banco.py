@@ -57,6 +57,24 @@ CREATE TABLE IF NOT EXISTS requisicoes (
     criada_em    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_requisicoes_chave ON requisicoes (chave_id, criada_em);
+CREATE TABLE IF NOT EXISTS pedidos (
+    id                   TEXT PRIMARY KEY,
+    external_reference   TEXT NOT NULL UNIQUE,
+    codigo_hash          TEXT NOT NULL UNIQUE,
+    cliente              TEXT NOT NULL,
+    plano                TEXT NOT NULL,
+    validade_dias        INTEGER NOT NULL CHECK (validade_dias > 0),
+    valor_centavos       INTEGER NOT NULL CHECK (valor_centavos > 0),
+    situacao             TEXT NOT NULL CHECK (situacao IN ('aguardando', 'pago', 'resgatado', 'estornado')),
+    criado_em            TEXT NOT NULL,
+    pagamento_id         TEXT UNIQUE,
+    valor_pago_centavos  INTEGER,
+    pago_em              TEXT,
+    chave_id             TEXT REFERENCES chaves(id),
+    resgatado_em         TEXT,
+    estornado_em         TEXT,
+    motivo_estorno       TEXT
+);
 """
 
 
@@ -269,3 +287,98 @@ class Banco:
                 (chave_id, limite),
             )
             return [dict(linha) for linha in linhas]
+
+
+# ---------------------------------------------------------------------- pedidos (Mercado Pago)
+
+
+@dataclass(frozen=True)
+class Pedido:
+    id: str
+    external_reference: str
+    cliente: str
+    plano: str
+    validade_dias: int
+    valor_centavos: int
+    situacao: Literal["aguardando", "pago", "resgatado", "estornado"]
+    criado_em: datetime
+    pagamento_id: str | None
+    valor_pago_centavos: int | None
+    pago_em: datetime | None
+    chave_id: str | None
+    resgatado_em: datetime | None
+    estornado_em: datetime | None
+    motivo_estorno: str | None
+
+
+def _pedido(linha: sqlite3.Row) -> Pedido:
+    def data(campo: str) -> datetime | None:
+        return datetime.fromisoformat(linha[campo]) if linha[campo] else None
+
+    return Pedido(
+        id=linha["id"], external_reference=linha["external_reference"], cliente=linha["cliente"],
+        plano=linha["plano"], validade_dias=linha["validade_dias"], valor_centavos=linha["valor_centavos"],
+        situacao=linha["situacao"], criado_em=data("criado_em"), pagamento_id=linha["pagamento_id"],
+        valor_pago_centavos=linha["valor_pago_centavos"], pago_em=data("pago_em"), chave_id=linha["chave_id"],
+        resgatado_em=data("resgatado_em"), estornado_em=data("estornado_em"), motivo_estorno=linha["motivo_estorno"],
+    )
+
+
+class BancoPedidos:
+    """Pedidos pagos pelo Mercado Pago. Mesmo arquivo SQLite das chaves."""
+
+    def __init__(self, banco: Banco):
+        self._banco = banco
+
+    def criar(self, *, codigo_hash: str, cliente: str, plano: str, validade_dias: int, valor_centavos: int) -> Pedido:
+        id_ = str(uuid.uuid4())
+        with self._banco._transacao() as c:
+            c.execute(
+                "INSERT INTO pedidos (id, external_reference, codigo_hash, cliente, plano, validade_dias, valor_centavos,"
+                " situacao, criado_em) VALUES (?,?,?,?,?,?,?,'aguardando',?)",
+                (id_, f"rtc-{id_}", codigo_hash, cliente, plano, validade_dias, valor_centavos, iso(agora())),
+            )
+            return _pedido(c.execute("SELECT * FROM pedidos WHERE id = ?", (id_,)).fetchone())
+
+    def obter(self, id_: str) -> Pedido | None:
+        with self._banco._conexao() as c:
+            linha = c.execute("SELECT * FROM pedidos WHERE id = ?", (id_,)).fetchone()
+        return _pedido(linha) if linha else None
+
+    def por_referencia(self, external_reference: str) -> Pedido | None:
+        with self._banco._conexao() as c:
+            linha = c.execute("SELECT * FROM pedidos WHERE external_reference = ?", (external_reference,)).fetchone()
+        return _pedido(linha) if linha else None
+
+    def por_codigo(self, codigo_hash: str) -> Pedido | None:
+        with self._banco._conexao() as c:
+            linha = c.execute("SELECT * FROM pedidos WHERE codigo_hash = ?", (codigo_hash,)).fetchone()
+        return _pedido(linha) if linha else None
+
+    def marcar_pago(self, id_: str, pagamento_id: str, valor_pago_centavos: int, pago_em: datetime) -> bool:
+        """Aguardando -> pago. Devolve False se o pedido já não estava aguardando (idempotente)."""
+        with self._banco._transacao() as c:
+            r = c.execute(
+                "UPDATE pedidos SET situacao = 'pago', pagamento_id = ?, valor_pago_centavos = ?, pago_em = ?"
+                " WHERE id = ? AND situacao = 'aguardando'",
+                (pagamento_id, valor_pago_centavos, iso(pago_em), id_),
+            )
+            return r.rowcount == 1
+
+    def marcar_resgatado(self, id_: str, chave_id: str) -> bool:
+        """Pago -> resgatado, com a chave emitida. Só um resgate passa, mesmo com requisições simultâneas."""
+        with self._banco._transacao() as c:
+            r = c.execute(
+                "UPDATE pedidos SET situacao = 'resgatado', chave_id = ?, resgatado_em = ? WHERE id = ? AND situacao = 'pago'",
+                (chave_id, iso(agora()), id_),
+            )
+            return r.rowcount == 1
+
+    def marcar_estornado(self, id_: str, motivo: str) -> bool:
+        with self._banco._transacao() as c:
+            r = c.execute(
+                "UPDATE pedidos SET situacao = 'estornado', estornado_em = ?, motivo_estorno = ?"
+                " WHERE id = ? AND situacao IN ('pago', 'resgatado')",
+                (iso(agora()), motivo, id_),
+            )
+            return r.rowcount == 1

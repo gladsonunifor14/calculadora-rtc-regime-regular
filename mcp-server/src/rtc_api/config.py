@@ -45,6 +45,10 @@ class Configuracao:
     agentes_simultaneos: int = 4
     tamanho_maximo_bytes: int = 5 * 1024 * 1024
     docs_admin: bool = False
+    # Mercado Pago (opcional): sem os dois, o webhook responde 503.
+    mp_webhook_secret: str | None = None
+    mp_access_token: str | None = None
+    mp_api_url: str = "https://api.mercadopago.com"
 
     @classmethod
     def from_env(cls) -> "Configuracao":
@@ -68,6 +72,9 @@ class Configuracao:
             planos=planos,
             agentes_simultaneos=int(os.environ.get("RTC_API_AGENTES_SIMULTANEOS", "4")),
             docs_admin=os.environ.get("RTC_API_DOCS_ADMIN", "").lower() in ("1", "true", "sim"),
+            mp_webhook_secret=os.environ.get("RTC_API_MP_WEBHOOK_SECRET") or None,
+            mp_access_token=os.environ.get("RTC_API_MP_ACCESS_TOKEN") or None,
+            mp_api_url=os.environ.get("RTC_API_MP_API_URL", "https://api.mercadopago.com").rstrip("/"),
         )
 
 
