@@ -20,6 +20,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field
 
 from .client import CalculadoraError, Config, RtcClient
+from .comparador import Cenario, ErroComparacao, comparar
 
 try:  # SDK MCP 2.x
     from mcp.server.mcpserver import MCPServer as _Servidor
@@ -44,6 +45,7 @@ Regras de uso:
 - Cite cClassTrib, CST, fundamentação legal e as versões em "metadados" ao apresentar um resultado.
 - Se "metadados.avisoDadosSimulados" estiver presente, avise que os valores são simulados.
 - Erros por item (códigos REG-xxx e VSN-xxx) podem ser detalhados com as ferramentas descrever_erro_*.
+- comparar_regimes_simples_regular compara o IBS/CBS no Simples e no regime regular (só IBS/CBS).
 - gerar_danfse produz o PDF da NFS-e a partir do XML autorizado e devolve o caminho do arquivo gravado.
 """
 
@@ -504,6 +506,31 @@ def criar_servidor(cliente: RtcClient | None = None) -> Any:
             f"calculadora/simples-nacional/atividades/{codigo}",
             params={"data": data, "tpDoc": tp_doc, "cClassTrib": c_class_trib},
         )
+
+    # ------------------------------------------------------------------
+    # Comparação Simples Nacional x regime regular
+    # ------------------------------------------------------------------
+
+    @mcp.tool(annotations=CALCULO)
+    async def comparar_regimes_simples_regular(cenario: Cenario) -> Resultado:
+        """Compara o IBS/CBS de uma empresa do Simples Nacional nos dois regimes possíveis a partir de 2027.
+
+        - Simples: IBS/CBS recolhido no DAS com as alíquotas efetivas pIBSSN/pCBSSN (do PGDAS).
+        - Regime regular: IBS/CBS apurado "por fora" do DAS, com as alíquotas nominais e as reduções da
+          cClassTrib, abatendo os créditos das compras.
+
+        Roda as duas calculadoras oficiais e devolve, por item e no total: o tributo devido em cada
+        regime, o saldo a pagar no regular depois dos créditos e o crédito que um cliente contribuinte
+        pode tomar. Só IBS/CBS: IRPJ, CSLL, ICMS, ISS e demais tributos do DAS ficam fora.
+
+        Cada item precisa de NCM ou NBS, CST, cClassTrib, valor e cAtivSN (use
+        listar_atividades_simples_nacional). Sem aliquotasNominais, 2027-2028 usam a premissa padrão
+        (CBS 8,8%, IBS 0,05% + 0,05%); de 2029 em diante elas são obrigatórias.
+        """
+        try:
+            return {"dados": await comparar(rtc, cenario), "metadados": {}}
+        except ErroComparacao as exc:
+            raise ToolError(str(exc)) from exc
 
     # ------------------------------------------------------------------
     # DANFSe (documento auxiliar da NFS-e em PDF)
