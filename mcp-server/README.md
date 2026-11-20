@@ -32,6 +32,7 @@ saída e explica a fundamentação, e os valores vêm sempre da calculadora ofic
 | `descrever_erro_simples_nacional` | Simples Nacional | Explica um código `VSN-xxx` |
 | `listar_atividades_simples_nacional` / `consultar_atividade_simples_nacional` | Simples Nacional | Atividades (cAtivSN) vigentes |
 | `gerar_danfse` | gerador de DANFSe | Gera o DANFSe (PDF da NFS-e) a partir do XML, com situação e canhoto, e grava o arquivo |
+| `auditar_nfe` | regime regular | Audita o IBS/CBS de uma NF-e/NFC-e: XSD, classificação, base, reduções, valores e totais |
 | `comparar_regimes_simples_regular` | Simples + regime regular | Compara o IBS/CBS no Simples e no regime regular, com créditos |
 | `consultar_versoes` | todas | Versão das calculadoras e disponibilidade dos três serviços |
 
@@ -227,6 +228,40 @@ O que ele compara, item a item e no total:
 
 A comparação também está disponível sem IA, pela ferramenta MCP `comparar_regimes_simples_regular` ou em código
 (`rtc_mcp.comparador.comparar`).
+
+## Agente auditor de NF-e
+
+`rtc-auditor` confere o grupo IBSCBS de uma NF-e ou NFC-e contra as calculadoras oficiais e explica cada
+divergência, com o impacto e a correção sugerida.
+
+```bash
+pip install -e ".[agente]"
+rtc-auditor nota.xml
+rtc-auditor nota.xml --contexto "o adquirente é produtor rural não contribuinte"
+```
+
+O que a auditoria confere, item a item:
+
+| Verificação | Como |
+|---|---|
+| Estrutura | XML contra o XSD oficial da nota |
+| Classificação | cClassTrib existe, pertence ao CST e aceita a NCM (erros REG-xxx do cálculo) |
+| Base de cálculo | vBC contra a base recalculada a partir de vProd, frete, seguro, outras despesas, desconto e os tributos deduzidos no ano |
+| Reduções e valores | pRedAliq, pAliqEfet e valores de IBS UF, IBS municipal e CBS recalculados sobre o vBC declarado |
+| Alíquotas nominais | em 2026, contra as alíquotas de referência; de 2027 em diante, as declaradas são usadas como premissa |
+| Totais | soma dos itens contra o grupo IBSCBSTot |
+
+- **Fora do escopo:** ICMS, IPI, PIS/COFINS, diferimento (gDif), devolução de tributos (gDevTrib), tributação
+  regular (gTribRegular), crédito presumido e Imposto Seletivo. Para emitentes do Simples Nacional (CRT 1, 2 ou
+  4), só a estrutura e a classificação são conferidas.
+- **Achados conferidos pelo código:** a auditoria em si é determinística (`rtc_mcp.auditoria.auditar`, ou a
+  ferramenta MCP `auditar_nfe`). Depois do relatório do agente, o código roda a auditoria de novo e confere:
+  se a situação declarada é a mesma, se todo item com erro foi explicado e se cada cClassTrib sugerida existe,
+  pertence ao CST e aceita a NCM. Qualquer falha, ou uma nota com divergências, sai com código 2.
+- **Segurança:** XML com DOCTYPE ou ENTITY é recusado.
+
+As notas de teste em `tests/fixtures/` foram geradas com as calculadoras (`python tests/fixtures/gerar_nfe.py`)
+e passam no XSD; os testes de mutação alteram um campo por vez e conferem que a auditoria acusa o erro certo.
 
 ## Testes
 
