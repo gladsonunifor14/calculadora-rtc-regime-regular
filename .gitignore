@@ -25,3 +25,14 @@ replay_pid*
 
 # build
 .mirror-manifest
+
+# Artefatos gerados localmente (build Maven e banco SQLite criado pelo Flyway)
+target/
+calculadora/
+
+# Saídas derivadas da avaliação do classificador
+.claude/hillclimb/**/traces/
+.claude/hillclimb/**/report.html
+.claude/hillclimb/**/state.json
+.claude/hillclimb/**/trajectory/
+__pycache__/
