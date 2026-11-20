@@ -29,6 +29,7 @@ dev = [
 [project.scripts]
 rtc-mcp = "rtc_mcp.server:main"
 rtc-classificador = "rtc_mcp.classificador:main"
+rtc-comparador = "rtc_mcp.agente_comparador:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rtc_mcp"]

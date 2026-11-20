@@ -32,6 +32,7 @@ saída e explica a fundamentação, e os valores vêm sempre da calculadora ofic
 | `descrever_erro_simples_nacional` | Simples Nacional | Explica um código `VSN-xxx` |
 | `listar_atividades_simples_nacional` / `consultar_atividade_simples_nacional` | Simples Nacional | Atividades (cAtivSN) vigentes |
 | `gerar_danfse` | gerador de DANFSe | Gera o DANFSe (PDF da NFS-e) a partir do XML, com situação e canhoto, e grava o arquivo |
+| `comparar_regimes_simples_regular` | Simples + regime regular | Compara o IBS/CBS no Simples e no regime regular, com créditos |
 | `consultar_versoes` | todas | Versão das calculadoras e disponibilidade dos três serviços |
 
 Toda resposta tem o formato `{"dados": ..., "metadados": {...}}`. Os `metadados` trazem `versaoAplicacao`,
@@ -51,6 +52,15 @@ do regime regular:
 ```bash
 cd calculadora-rtc-gerador-danfse
 SERVER_PORT=8083 go run ./cmd/danfse
+```
+
+A calculadora do Simples Nacional não traz os scripts do banco, mas usa as mesmas tabelas do banco do regime
+regular (`ATIVIDADE_SIMPLES_NACIONAL` etc.). Basta copiar o banco gerado por este projeto:
+
+```bash
+cd calculadora-rtc-simples-nacional
+mkdir -p calculadora/db && cp ../calculadora-rtc-regime-regular/calculadora/db/calculadora-pro.db calculadora/db/
+./mvnw clean package -DskipTests && java -Dspring.profiles.active=offline -jar target/api-simples-nacional.jar
 ```
 
 ```bash
@@ -182,6 +192,41 @@ Classificação confirmada.
 Detalhes técnicos: tool runner do SDK `anthropic` (que usa message threads), pensamento adaptativo, cache de
 prompt e fallback automático do servidor em caso de recusa indevida (`fallbacks: "default"`). Para ver o log do
 servidor MCP, defina `RTC_DEBUG=1`.
+
+## Agente comparador de regimes (Simples x regime regular)
+
+A partir de 2027, a empresa do Simples Nacional pode recolher o IBS e a CBS dentro do DAS ou apurá-los pelo
+regime regular, por fora do DAS. `rtc-comparador` ajuda nessa decisão: monta o cenário a partir da descrição da
+empresa, roda as duas calculadoras e escreve um parecer.
+
+```bash
+pip install -e ".[agente]"
+rtc-comparador "Mercadinho em Porto Alegre, Simples anexo I. Num mês típico vendo R$ 30 mil em arroz, feijão \
+  e café e R$ 20 mil em produtos de limpeza e papelaria, quase tudo a consumidor final. No PGDAS a alíquota \
+  efetiva é 1,25% de IBS e 2,75% de CBS. Nas compras do mês paguei uns R$ 900 de CBS e R$ 10 de IBS."
+```
+
+O que ele compara, item a item e no total:
+
+| | Simples (no DAS) | Regime regular (por fora) |
+|---|---|---|
+| IBS/CBS sobre as vendas | alíquotas efetivas do PGDAS | alíquotas nominais com as reduções da cClassTrib |
+| Créditos das compras | não há | abatidos do débito |
+| Crédito do cliente contribuinte | o IBS/CBS devido no Simples | o IBS/CBS destacado na nota |
+
+- **Só IBS/CBS.** IRPJ, CSLL, ICMS, ISS e os demais tributos do DAS ficam fora, e o parecer diz isso.
+- **Dados que vêm do usuário:** as alíquotas efetivas do Simples (PGDAS), o perfil dos clientes e o IBS/CBS
+  pago nas compras. O agente pergunta em vez de estimar.
+- **Alíquotas nominais do regime regular:** em 2027 e 2028, premissa padrão editável (CBS 8,8%, a estimativa
+  dos exemplos oficiais, e IBS de 0,05% + 0,05%); de 2029 em diante, precisam ser informadas. Os valores são
+  simulações e vêm marcados como tal.
+- **Números conferidos:** o modelo não escreve os números do resultado. Depois do parecer, o código roda a
+  comparação de novo com o cenário final e anexa o resultado das calculadoras. Se os clientes são consumidores
+  finais e a recomendação contraria o menor tributo a pagar, o parecer vai para revisão humana (código de
+  saída 2), assim como quando falta informação.
+
+A comparação também está disponível sem IA, pela ferramenta MCP `comparar_regimes_simples_regular` ou em código
+(`rtc_mcp.comparador.comparar`).
 
 ## Testes
 
