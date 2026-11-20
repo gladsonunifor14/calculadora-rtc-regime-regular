@@ -34,6 +34,10 @@ Todos os caminhos começam com `http://localhost:8080/api/calculadora`. A lista 
 
 Exemplos de utilização da API estão em [docs/exemplos.md](docs/exemplos.md).
 
+### Integração com agentes de IA (MCP)
+
+A pasta [mcp-server/](mcp-server/README.md) contém um servidor MCP em Python que expõe esta calculadora e a do Simples Nacional como ferramentas para agentes de IA (Claude Code, Claude Desktop e outros clientes MCP).
+
 ---
 
 ## Requisitos
