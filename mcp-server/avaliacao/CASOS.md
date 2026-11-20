@@ -2,6 +2,8 @@
 
 41 casos (31 definidos, 10 ambíguos), data do fato gerador 2027-03-10, base de dados da calculadora V0059. Derivados dos pares NCM/NBS → cClassTrib dos testes oficiais (`src/test/resources/entradas`). Cada gabarito foi conferido na calculadora: a cClassTrib existe, pertence ao CST e aceita a NCM/NBS.
 
+**Gabarito:** derivado dos pares NCM/NBS -> cClassTrib dos testes oficiais; conferido na calculadora; revisado e aprovado pelo responsável em 2026-11-20.
+
 **O que revisar:** se o gabarito está certo para a descrição e o contexto. Atenção especial às linhas com *outras classificações do anexo*: a calculadora aceita mais de uma, e a escolha depende de interpretação.
 
 Gerado por `gerar_casos.py`; para mudar um caso, edite `casos_rascunho.py` e gere de novo.

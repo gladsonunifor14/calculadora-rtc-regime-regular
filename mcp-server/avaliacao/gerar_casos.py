@@ -13,6 +13,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from casos_rascunho import C  # noqa: E402
 
 AQUI = Path(__file__).parent
+# Registro de quem validou o gabarito; atualize ao mudar casos e obter nova revisão.
+ORIGEM_GABARITO = (
+    "derivado dos pares NCM/NBS -> cClassTrib dos testes oficiais; conferido na calculadora; "
+    "revisado e aprovado pelo responsável em 2026-11-20"
+)
 B = os.environ.get("RTC_REGIME_GERAL_URL", "http://localhost:8080/api") + "/calculadora/dados-abertos"
 cli = httpx.Client(timeout=60)
 
@@ -61,6 +66,7 @@ def main():
         if k["tipo"] == "definido":
             assert g["cst"] in cst_de[codigos[0]], f"{k['id']}: CST {g['cst']}"
         k = dict(k)
+        k["origem_gabarito"] = ORIGEM_GABARITO
         k["conferencia"] = {
             "outrasDoAnexo": [c for c in do_anexo(g["ncm"]) if c not in codigos] if g.get("ncm") else [],
             "versaoBaseDados": versao.get("versaoDb"),
@@ -84,6 +90,7 @@ def main():
         "oficiais (`src/test/resources/entradas`). Cada gabarito foi conferido na calculadora: a cClassTrib existe, "
         "pertence ao CST e aceita a NCM/NBS.\n"
     )
+    md.append(f"**Gabarito:** {ORIGEM_GABARITO}.\n")
     md.append("**O que revisar:** se o gabarito está certo para a descrição e o contexto. Atenção especial às linhas "
               "com *outras classificações do anexo*: a calculadora aceita mais de uma, e a escolha depende de "
               "interpretação.\n")

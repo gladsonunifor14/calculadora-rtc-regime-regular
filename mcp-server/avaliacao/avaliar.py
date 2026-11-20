@@ -412,7 +412,21 @@ async def principal(args: argparse.Namespace, cliente_fabrica: Any = None, param
     print(f"Concluído em {time.monotonic() - inicio:.0f} s: {sum(s == 'ok' for s in situacoes)} ok, "
           f"{sum(s == 'erro' for s in situacoes)} erros, {sum(s == 'truncated' for s in situacoes)} truncadas")
     print(resumo(flow / args.variante))
+    gerar_relatorio(flow)
     return 0
+
+
+def gerar_relatorio(flow: Path) -> None:
+    """Gera <flow>/report.html com o gerador que acompanha a avaliação, se o Node estiver instalado."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node") or shutil.which("bun")
+    if not node:
+        print("Node não encontrado: report.html não gerado (o resumo acima tem os números).")
+        return
+    r = subprocess.run([node, str(AQUI / "build-report-lite.mjs"), str(flow)], capture_output=True, text=True)
+    print(f"Relatório: {flow / 'report.html'}" if r.returncode == 0 else f"Falha ao gerar o relatório: {r.stderr[-500:]}")
 
 
 def argumentos(argv: list[str] | None = None) -> argparse.Namespace:
@@ -438,6 +452,7 @@ def main() -> None:
     args = argumentos()
     if args.resumo:
         print(resumo(Path(args.flow) / args.variante))
+        gerar_relatorio(Path(args.flow))
         return
     sys.exit(asyncio.run(principal(args)))
 

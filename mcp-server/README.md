@@ -212,3 +212,6 @@ definidos; nos ambíguos, sinalizar revisão e propor uma classificação plaus�
 NCM/NBS, revisão indevida, conferência na calculadora, recusas, tokens, custo e latência. Os resultados vão para
 `.claude/hillclimb/classificador/<variante>/` na raiz do repositório. Para mudar os casos, edite
 `avaliacao/casos_rascunho.py` e rode `python avaliacao/gerar_casos.py` com a calculadora em execução.
+
+O gabarito foi revisado e aprovado (registro em `origem_gabarito` de cada caso). Ao fim de cada rodada o
+runner gera `report.html` com `avaliacao/build-report-lite.mjs`, se o Node estiver instalado.
