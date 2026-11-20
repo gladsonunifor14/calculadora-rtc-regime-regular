@@ -291,6 +291,30 @@ rtc-corretor operacao.json
   exemplo, um serviço com uma cClassTrib de mercadoria) não gera erro e não é corrigida; para isso, use o
   classificador ou o auditor.
 
+## Agente consultor jurídico
+
+`rtc-consultor` responde perguntas sobre o IBS e a CBS citando a fundamentação legal oficial: os trechos da LC
+214/2025 que a calculadora associa a cada classificação tributária, mais as tabelas de consulta (reduções, CST,
+NCM/NBS, alíquotas de referência).
+
+```bash
+pip install -e ".[agente]"
+rtc-consultor "Serviços de educação têm redução de IBS e CBS? De quanto?"
+rtc-consultor "Como fica a venda de dispositivos médicos para hospital público?" --data 2027-06-01
+```
+
+- **Base inteira no prompt:** os cerca de 160 trechos da base (cerca de 110 mil caracteres) vão no prompt de
+  sistema, em cache, em vez de passar por uma busca que poderia não achar o trecho certo. A base é carregada da
+  calculadora na data de referência e a versão dela aparece na resposta.
+- **Citações conferidas pelo código:** cada citação traz o id do trecho (`F-<cClassTrib>`) e o texto copiado.
+  O código confere que o trecho existe e que o texto está nele palavra por palavra (ignorando maiúsculas,
+  espaços e aspas), que todo artigo mencionado na resposta está num trecho citado e que toda cClassTrib
+  mencionada existe. Citação parafraseada ou artigo sem apoio mandam a resposta para revisão (código 2).
+- **Fora da base:** a base cobre os dispositivos ligados às classificações tributárias, não a lei inteira.
+  Perguntas sobre cashback, split payment, prazos de apuração e afins são respondidas como fora da base, sem
+  fundamentação de memória, e também vão para revisão.
+- Não substitui parecer profissional para o caso concreto.
+
 ## Testes
 
 ```bash
